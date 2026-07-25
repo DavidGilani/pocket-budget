@@ -3,6 +3,8 @@
 import { db, initDB, getSetting, setSetting } from './db.js';
 import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays, cycleForDate, monthlyEquivalent, dailyEquivalent, delegate } from './utils.js';
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
+import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
+import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore } from './sync.js';
 
 const state = {
   view: 'balance',
@@ -19,6 +21,7 @@ const state = {
   analysisViewingCycle: null,
   viewingCycle: null,
   pendingSync: 0,
+  currentUser: null,
 };
 
 const viewContainer = document.getElementById('view');
@@ -262,9 +265,11 @@ async function saveEntry(overlay) {
 
   if (state.entryEditId) {
     await db.transactions.update(state.entryEditId, { ...txn, updatedAt: new Date().toISOString() });
+    await queueWrite('transactions', state.entryEditId);
     showToast('Transaction updated');
   } else {
-    await db.transactions.add(txn);
+    const newId = await db.transactions.add(txn);
+    await queueWrite('transactions', newId);
     showToast('Saved');
   }
 
@@ -379,6 +384,7 @@ async function showTxnMenu(id) {
   overlay.querySelector('#txn-del-btn').onclick = async () => {
     if (txn.distributionId) { showToast('Edit the parent distribution to modify this entry'); overlay.remove(); return; }
     await db.transactions.delete(id);
+    await queueDelete('transactions', id);
     overlay.remove();
     showToast('Deleted');
     renderTransactions();
@@ -558,7 +564,8 @@ async function openRecurringEditor(id, type) {
   if (item) {
     overlay.querySelector('#rec-del').onclick = async () => {
       if (!confirm('Delete this item?')) return;
-      if (isExpense) await db.recurringExpenses.delete(id); else await db.recurringIncome.delete(id);
+      if (isExpense) { await db.recurringExpenses.delete(id); await queueDelete('recurringExpenses', id); }
+      else { await db.recurringIncome.delete(id); await queueDelete('recurringIncome', id); }
       overlay.remove(); renderRecurring();
     };
   }
@@ -572,11 +579,13 @@ async function openRecurringEditor(id, type) {
       const freq = overlay.querySelector('#rec-freq').value;
       const shared = overlay.querySelector('#rec-shared').checked;
       const data = { description: desc, amount, frequency: freq, isShared: shared, sharePercent: 50, startDate: start, endDate: end, isActive: true };
-      if (id) await db.recurringExpenses.update(id, data); else await db.recurringExpenses.add(data);
+      if (id) { await db.recurringExpenses.update(id, data); await queueWrite('recurringExpenses', id); }
+      else { const newId = await db.recurringExpenses.add(data); await queueWrite('recurringExpenses', newId); }
     } else {
       const interval = parseInt(overlay.querySelector('#rec-interval').value) || 30;
       const data = { description: desc, amount, intervalDays: interval, startDate: start, endDate: end, isActive: true };
-      if (id) await db.recurringIncome.update(id, data); else await db.recurringIncome.add(data);
+      if (id) { await db.recurringIncome.update(id, data); await queueWrite('recurringIncome', id); }
+      else { const newId = await db.recurringIncome.add(data); await queueWrite('recurringIncome', newId); }
     }
     overlay.remove(); renderRecurring(); showToast(id ? 'Updated' : 'Saved');
   };
@@ -719,8 +728,11 @@ async function openDistEditor(id) {
   if (dist) {
     overlay.querySelector('#dist-del').onclick = async () => {
       if (!confirm('Delete this and all its daily entries?')) return;
+      const childIds = await db.transactions.where('distributionId').equals(id).primaryKeys();
       await db.transactions.where('distributionId').equals(id).delete();
       await db.distributions.delete(id);
+      await Promise.all(childIds.map(cid => queueDelete('transactions', cid)));
+      await queueDelete('distributions', id);
       overlay.remove(); renderDistributions(); showToast('Deleted');
     };
   }
@@ -733,13 +745,20 @@ async function openDistEditor(id) {
     const isIncome = overlay.querySelector('#dist-income').checked;
     if (!description || isNaN(totalAmount) || !startDate || !endDate) { showToast('Fill in all fields'); return; }
     if (endDate < startDate) { showToast('End date must be after start date'); return; }
-    if (id) await db.transactions.where('distributionId').equals(id).delete();
+    if (id) {
+      const oldChildIds = await db.transactions.where('distributionId').equals(id).primaryKeys();
+      await db.transactions.where('distributionId').equals(id).delete();
+      await Promise.all(oldChildIds.map(cid => queueDelete('transactions', cid)));
+    }
     const distData = { description, totalAmount, categoryId, startDate, endDate, isIncome, isFinished: endDate < today() };
     let distId;
     if (id) { await db.distributions.update(id, distData); distId = id; }
     else { distId = await db.distributions.add(distData); }
+    await queueWrite('distributions', distId);
     const children = generateDistributionChildren({ ...distData, id: distId });
     await db.transactions.bulkAdd(children);
+    const newChildren = await db.transactions.where('distributionId').equals(distId).toArray();
+    await Promise.all(newChildren.map(c => queueWrite('transactions', c.id)));
     overlay.remove(); renderDistributions(); showToast(id ? 'Updated' : `Created ${children.length} daily entries`);
   };
 }
@@ -817,6 +836,8 @@ async function openSnapshotEntry(accounts, latest) {
     });
     if (!entries.length) { showToast('Enter at least one balance'); return; }
     await db.accountSnapshots.bulkAdd(entries);
+    const saved = await db.accountSnapshots.where('date').equals(date).toArray();
+    await Promise.all(saved.slice(-entries.length).map(s => queueWrite('accountSnapshots', s.id)));
     overlay.remove(); renderAccounts(); showToast(`Saved ${entries.length} balances`);
   };
 }
@@ -824,6 +845,44 @@ async function openSnapshotEntry(accounts, latest) {
 async function renderSettings() {
   const savings = await getSetting('savingsAmount') ?? 1500;
   const cycleStart = await getSetting('cycleStartDay') ?? 1;
+  const user = state.currentUser;
+  const ss = syncState;
+  const lastSync = await getSetting('lastSyncAt');
+  const syncAgo = lastSync ? (() => {
+    const diff = Math.round((Date.now() - lastSync) / 60000);
+    if (diff < 1) return 'just now';
+    if (diff < 60) return `${diff}m ago`;
+    return `${Math.round(diff / 60)}h ago`;
+  })() : null;
+
+  const syncSection = `
+    <div class="settings-section">
+      <div class="settings-section-title">Sync</div>
+      <div class="settings-card">
+        ${user ? `
+          <div class="settings-row" style="gap:12px">
+            <img class="sync-avatar" src="${user.photoURL ?? ''}" alt="">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${user.displayName ?? user.email}</div>
+              <div style="font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${user.email}</div>
+            </div>
+            ${ss.active ? `<span class="sync-chip sync-active">Syncing…</span>` :
+              ss.error ? `<span class="sync-chip sync-error">Error</span>` :
+              syncAgo ? `<span class="sync-chip sync-ok">Synced ${syncAgo}</span>` : ''}
+          </div>
+          <div class="settings-row" id="sync-now-btn"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Sync now</span></div>
+          <div class="settings-row" id="sign-out-btn" style="color:var(--red)"><span class="settings-row-icon">👋</span><span class="settings-row-label" style="color:var(--red)">Sign out</span></div>
+        ` : `
+          <div style="padding:4px 0 12px;font-size:13px;color:var(--text-2);line-height:1.6">Sign in to sync your data across devices automatically.</div>
+          <button class="btn-google" id="google-signin-btn">
+            <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+            Sign in with Google
+          </button>
+        `}
+      </div>
+    </div>
+  `;
+
   viewContainer.innerHTML = `
     <div class="settings-screen">
       <div class="screen-header" style="padding-top:52px"><div style="width:34px"></div><span class="screen-title">Settings</span><div style="width:34px"></div></div>
@@ -850,11 +909,12 @@ async function renderSettings() {
           <div class="settings-row" id="clear-btn" style="color:var(--red)"><span class="settings-row-icon">🗑️</span><span class="settings-row-label" style="color:var(--red)">Clear all data</span></div>
         </div>
       </div>
+      ${syncSection}
       <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">Pocket Ledger - Personal Finance<br>Data stored locally on this device</div>
     </div>
   `;
-  viewContainer.querySelector('#setting-savings').onchange = async e => { await setSetting('savingsAmount', Number(e.target.value)); showToast('Savings target updated'); };
-  viewContainer.querySelector('#setting-cycle').onchange = async e => { await setSetting('cycleStartDay', Number(e.target.value)); showToast('Cycle start day updated'); };
+  viewContainer.querySelector('#setting-savings').onchange = async e => { await setSetting('savingsAmount', Number(e.target.value)); await queueWrite('settings', 'savingsAmount'); showToast('Savings target updated'); };
+  viewContainer.querySelector('#setting-cycle').onchange = async e => { await setSetting('cycleStartDay', Number(e.target.value)); await queueWrite('settings', 'cycleStartDay'); showToast('Cycle start day updated'); };
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring');
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-accounts').onclick = () => navigate('accounts');
@@ -866,6 +926,12 @@ async function renderSettings() {
     await Promise.all([db.transactions.clear(), db.distributions.clear(), db.accountSnapshots.clear(), db.friendTransactions.clear()]);
     showToast('Data cleared'); navigate('balance');
   };
+  const signinBtn = viewContainer.querySelector('#google-signin-btn');
+  if (signinBtn) signinBtn.onclick = async () => { try { await signInWithGoogle(); } catch (e) { showToast('Sign-in failed: ' + e.message); } };
+  const syncNowBtn = viewContainer.querySelector('#sync-now-btn');
+  if (syncNowBtn) syncNowBtn.onclick = async () => { showToast('Syncing…'); await pullFromFirestore(); renderSettings(); };
+  const signOutBtn = viewContainer.querySelector('#sign-out-btn');
+  if (signOutBtn) signOutBtn.onclick = async () => { await signOutUser(); renderSettings(); };
 }
 
 function renderImport() {
@@ -973,8 +1039,16 @@ async function exportData() {
 
 async function init() {
   await initDB();
+  await handleRedirectResult();
   navBtns.forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.view)));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  initSync(user => {
+    state.currentUser = user;
+    if (state.view === 'settings') renderSettings();
+  });
+  onSync(() => {
+    if (state.view === 'settings') renderSettings();
+  });
   navigate('balance');
 }
 

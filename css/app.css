@@ -685,6 +685,13 @@ html, body {
 .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin .6s linear infinite; margin: 40px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.btn-google { display: flex; align-items: center; gap: 10px; padding: 11px 20px; background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-size: 15px; font-weight: 500; cursor: pointer; width: 100%; justify-content: center; color: var(--text); }
+.sync-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.sync-chip { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; }
+.sync-ok { background: #e8f5e9; color: #2e7d32; }
+.sync-active { background: #e3f2fd; color: #1558b0; }
+.sync-error { background: #ffebee; color: var(--red); }
+
 @media (min-width: 430px) {
   #app { box-shadow: 0 0 40px rgba(0,0,0,.15); }
 }
