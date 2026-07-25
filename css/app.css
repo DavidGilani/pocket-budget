@@ -320,8 +320,6 @@ html, body {
   min-height: 56px;
 }
 
-.entry-amount-display.income { color: var(--green); }
-.entry-amount-display.expense { color: var(--red); }
 .entry-amount-display.placeholder { color: var(--text-2); }
 
 .cat-collapsed-row {
@@ -385,30 +383,109 @@ html, body {
 .numpad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
+  gap: 6px;
   background: var(--border);
   border-top: 1px solid var(--border);
+  padding: 6px;
   flex-shrink: 0;
 }
 
 .numpad-key {
   background: var(--card);
   border: none;
-  height: 46px;
-  font-size: 20px;
+  height: 56px;
+  font-size: 22px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text);
-  transition: background .1s;
+  border-radius: 10px;
+  transition: background .08s, color .08s;
   font-weight: 300;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .numpad-key:active { background: var(--bg); }
+.numpad-key.pressed { background: var(--blue); color: white; }
 .numpad-key.delete { font-size: 18px; color: var(--text-2); }
-.numpad-key.action { background: var(--blue); color: white; font-weight: 600; font-size: 16px; }
+.numpad-key.action { background: var(--blue); color: white; font-weight: 600; font-size: 16px; border-radius: 10px; }
 .numpad-key.action:active { background: var(--blue-dark); }
+
+/* Custom date picker */
+.datepick-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px 4px;
+}
+.datepick-month-label { font-size: 16px; font-weight: 600; color: var(--text); }
+.datepick-nav {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: var(--blue);
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+.datepick-nav:disabled { color: var(--text-3, var(--text-2)); opacity: 0.3; }
+.datepick-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  padding: 4px 12px;
+  gap: 2px;
+}
+.datepick-weekdays div {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  padding: 4px 0;
+}
+.datepick-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  padding: 4px 12px 16px;
+}
+.datepick-day {
+  aspect-ratio: 1;
+  border: none;
+  background: none;
+  border-radius: 50%;
+  font-size: 15px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+}
+.datepick-day:active { background: var(--bg); }
+.datepick-day.selected { background: var(--blue); color: white; }
+.datepick-day.disabled { color: var(--text-2); opacity: 0.3; cursor: default; }
+
+/* Note autocomplete chips */
+.note-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px;
+  min-height: 0;
+}
+.note-chip {
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: 16px;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.note-chip:active { background: var(--blue-pale); border-color: var(--blue); color: var(--blue); }
 
 .entry-fields {
   padding: 8px 16px 4px;

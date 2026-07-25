@@ -168,7 +168,7 @@ async function openEntry(type, existingTxn = null) {
         <button class="sheet-close" id="entry-close">✕</button>
       </div>
       <div class="sheet-body">
-        <div class="entry-amount-display ${type} ${state.entryPence === 0 ? 'placeholder' : ''}" id="entry-display">
+        <div class="entry-amount-display ${state.entryPence === 0 ? 'placeholder' : ''}" id="entry-display">
           ${state.entryPence > 0 ? fmt(state.entryPence / 100) : '£0.00'}
         </div>
 
@@ -194,16 +194,18 @@ async function openEntry(type, existingTxn = null) {
         </div>
 
         <div class="entry-fields">
-          <div class="entry-field">
+          <div class="entry-field" id="date-field" style="cursor:pointer">
             <span class="entry-field-icon">📅</span>
             <label>Date</label>
-            <input type="date" id="entry-date" value="${state.entryDate}" max="${today()}">
+            <span id="entry-date-display" style="flex:1;font-size:15px;color:var(--text);text-align:right">${fmtDate(state.entryDate)}</span>
+            <span style="color:var(--text-2);font-size:18px">›</span>
           </div>
           <div class="entry-field">
             <span class="entry-field-icon">📝</span>
             <label>Note</label>
-            <input type="text" id="entry-note" placeholder="Optional note" value="${state.entryNote}" maxlength="200">
+            <input type="text" id="entry-note" placeholder="Optional note" value="${state.entryNote}" maxlength="200" autocomplete="off">
           </div>
+          <div id="note-suggestions" class="note-suggestions"></div>
         </div>
       </div>
 
@@ -234,9 +236,10 @@ async function openEntry(type, existingTxn = null) {
     overlay.querySelector('#cat-preview').innerHTML = `<span style="margin-right:4px">${el.dataset.catIcon}</span>${el.dataset.catName}`;
     overlay.querySelector('#cat-grid').style.display = 'none';
     overlay.querySelector('#cat-collapsed').style.display = 'flex';
+    setupNoteAutocomplete(overlay);
   });
 
-  delegate(overlay, 'click', '.numpad-key', (e, el) => {
+  delegate(overlay, 'click', '.numpad-key:not(.action)', (e, el) => {
     const key = el.dataset.key;
     if (key === '⌫') {
       state.entryPence = Math.floor(state.entryPence / 10);
@@ -246,12 +249,21 @@ async function openEntry(type, existingTxn = null) {
       const next = state.entryPence * 10 + parseInt(key);
       if (next <= 9999999) state.entryPence = next;
     }
+    el.classList.add('pressed');
+    setTimeout(() => el.classList.remove('pressed'), 120);
     updateAmountDisplay(overlay);
   });
 
-  overlay.querySelector('#entry-date').onchange = e => { state.entryDate = e.target.value; };
+  overlay.querySelector('#date-field').onclick = () => {
+    openDatePicker(state.entryDate, today(), date => {
+      state.entryDate = date;
+      overlay.querySelector('#entry-date-display').textContent = fmtDate(date);
+    });
+  };
   overlay.querySelector('#entry-note').oninput = e => { state.entryNote = e.target.value; };
   overlay.querySelector('#entry-save').onclick = () => saveEntry(overlay);
+
+  if (state.entryCategory) setupNoteAutocomplete(overlay);
 }
 
 function updateAmountDisplay(overlay) {
@@ -263,6 +275,91 @@ function updateAmountDisplay(overlay) {
     display.textContent = fmt(state.entryPence / 100);
     display.classList.remove('placeholder');
   }
+}
+
+function openDatePicker(currentDate, maxDate, onSelect) {
+  let [viewY, viewM] = currentDate.split('-').map(Number);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:400px">
+      <div class="sheet-handle"></div>
+      <div class="datepick-nav-row">
+        <button class="datepick-nav" id="dp-prev">‹</button>
+        <span class="datepick-month-label" id="dp-label"></span>
+        <button class="datepick-nav" id="dp-next">›</button>
+      </div>
+      <div class="datepick-weekdays">
+        ${['M','T','W','T','F','S','S'].map(d => `<div>${d}</div>`).join('')}
+      </div>
+      <div class="datepick-grid" id="dp-grid"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  function render() {
+    const firstDow = new Date(viewY, viewM - 1, 1).getDay();
+    const startOffset = (firstDow + 6) % 7;
+    const daysInMonth = new Date(viewY, viewM, 0).getDate();
+    const label = new Date(viewY, viewM - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    overlay.querySelector('#dp-label').textContent = label;
+    const cells = Array(startOffset).fill(null);
+    for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+    overlay.querySelector('#dp-grid').innerHTML = cells.map(d => {
+      if (!d) return '<div></div>';
+      const ds = `${viewY}-${String(viewM).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const sel = ds === currentDate ? 'selected' : '';
+      const dis = ds > maxDate ? 'disabled' : '';
+      return `<button class="datepick-day ${sel} ${dis}" data-date="${ds}" ${dis}>${d}</button>`;
+    }).join('');
+    overlay.querySelector('#dp-prev').disabled = viewY <= 2020 && viewM <= 1;
+    const nextM = viewM === 12 ? 1 : viewM + 1;
+    const nextY = viewM === 12 ? viewY + 1 : viewY;
+    overlay.querySelector('#dp-next').disabled = `${nextY}-${String(nextM).padStart(2,'0')}-01` > maxDate;
+  }
+  render();
+
+  overlay.querySelector('#dp-prev').onclick = () => { viewM--; if (viewM < 1) { viewM = 12; viewY--; } render(); };
+  overlay.querySelector('#dp-next').onclick = () => { viewM++; if (viewM > 12) { viewM = 1; viewY++; } render(); };
+  delegate(overlay, 'click', '.datepick-day:not([disabled])', (e, el) => {
+    currentDate = el.dataset.date;
+    onSelect(currentDate);
+    overlay.remove();
+  });
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+}
+
+async function setupNoteAutocomplete(overlay) {
+  const noteInput = overlay.querySelector('#entry-note');
+  const suggestEl = overlay.querySelector('#note-suggestions');
+  if (!noteInput || !suggestEl || !state.entryCategory) return;
+
+  const pastTxns = await db.transactions
+    .filter(t => t.categoryId === state.entryCategory && t.note && t.note.trim())
+    .toArray();
+  const freq = {};
+  for (const t of pastTxns) { const n = t.note.trim(); freq[n] = (freq[n] ?? 0) + 1; }
+  const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([n]) => n);
+
+  function refresh() {
+    const q = noteInput.value.toLowerCase();
+    const matches = q ? sorted.filter(n => n.toLowerCase().startsWith(q)) : sorted.slice(0, 6);
+    suggestEl.innerHTML = matches.slice(0, 6).map(n =>
+      `<button class="note-chip" data-note="${n.replace(/"/g,'&quot;')}">${n}</button>`
+    ).join('');
+  }
+
+  noteInput.addEventListener('focus', refresh);
+  const existingInput = noteInput.oninput;
+  noteInput.oninput = e => { state.entryNote = e.target.value; refresh(); };
+  delegate(suggestEl, 'click', '.note-chip', (e, el) => {
+    noteInput.value = el.dataset.note;
+    state.entryNote = el.dataset.note;
+    suggestEl.innerHTML = '';
+    noteInput.blur();
+  });
+  refresh();
 }
 
 function closeEntry() {
@@ -328,7 +425,14 @@ async function renderTransactions() {
     if (!groups[t.date]) groups[t.date] = [];
     groups[t.date].push(t);
   }
-  const dates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+
+  // Show every day up to today (or month end), not just days with transactions
+  const showUntil = today() < monthEnd ? today() : monthEnd;
+  const allDates = [];
+  let dayCursor = monthStart;
+  while (dayCursor <= showUntil) { allDates.push(dayCursor); dayCursor = addDays(dayCursor, 1); }
+  allDates.reverse();
+  const dates = query ? allDates.filter(d => groups[d]?.length > 0) : allDates;
 
   const budgetRow = `
     <div class="txn-row txn-row-budget">
@@ -367,7 +471,7 @@ async function renderTransactions() {
         ${dates.length === 0 ? `
           <div class="empty-state"><div class="empty-icon">📋</div><div class="empty-title">No transactions in ${monthLabel}</div><div class="empty-text">Tap + to add a transaction</div></div>
         ` : dates.map(date => {
-          const dayTxns = groups[date];
+          const dayTxns = groups[date] ?? [];
           const dayTotal = dayTxns.reduce((s, t) => s + t.amount, dailyAllowance);
           const d = new Date(date + 'T12:00:00');
           const dayLabel = d.toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -580,7 +684,7 @@ async function renderRecurring() {
   items.sort((a, b) => monthlyEquivalent(b.amount ?? 0, b.frequency ?? 'monthly') - monthlyEquivalent(a.amount ?? 0, a.frequency ?? 'monthly'));
 
   const totalMonthly = items.reduce((s, r) => s + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
-  const totalDaily = totalMonthly / cycleLen;
+  const totalDaily = items.reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
 
   const formatMeta = r => {
     const start = r.startDate ? fmtDate(r.startDate) : '-';
