@@ -711,7 +711,7 @@ async function showTxnMenu(id) {
     overlay.remove();
     if (txn.distributionId) {
       const dist = await db.distributions.get(txn.distributionId);
-      if (dist) { navigate(dist.isIncome ? 'extraIncomes' : 'distributions'); return; }
+      if (dist) { openDistEditor(dist.id, !!dist.isIncome); return; }
     }
     openEntry(txn.amount >= 0 ? 'income' : 'expense', txn);
   };
@@ -818,10 +818,18 @@ async function renderRecurring() {
     items = (await db.recurringIncome.toArray()).filter(activeFilter);
   }
 
-  items.sort((a, b) => monthlyEquivalent(b.amount ?? 0, b.frequency ?? 'monthly') - monthlyEquivalent(a.amount ?? 0, a.frequency ?? 'monthly'));
+  // Pro-rate each item by how many days it overlaps the selected cycle
+  function proratedRate(r) {
+    const effStart = r.startDate > cycle.start ? r.startDate : cycle.start;
+    const effEnd = (!r.endDate || r.endDate === '4001-01-01' || r.endDate > cycle.end) ? cycle.end : r.endDate;
+    const overlap = Math.max(0, diffDays(effStart, effEnd) + 1);
+    return dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen) * overlap / cycleLen;
+  }
 
-  const totalMonthly = items.reduce((s, r) => s + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
-  const totalDaily = items.reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
+  items.sort((a, b) => proratedRate(b) - proratedRate(a));
+
+  const totalDaily = items.reduce((s, r) => s + proratedRate(r), 0);
+  const totalMonthly = totalDaily * cycleLen;
 
   const cycleLabel = new Date(cycle.start + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
@@ -871,7 +879,7 @@ async function renderRecurring() {
               <div class="recurring-card-meta">${formatMeta(r)}</div>
             </div>
             <div class="recurring-card-amount">
-              <div class="recurring-card-daily">${fmt(dailyEquivalent(r.amount, r.frequency ?? 'monthly', cycleLen))}<span style="font-size:14px;font-weight:400"> /day</span></div>
+              <div class="recurring-card-daily">${fmt(proratedRate(r))}<span style="font-size:14px;font-weight:400"> /day</span></div>
             </div>
           </div>
         `).join('')}
@@ -1496,7 +1504,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v13)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v14)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -1670,6 +1678,24 @@ async function runDataMigrations() {
       try { await queueWrite('categories', 14); } catch {}
     }
     await setSetting('dataVersion', 2);
+  }
+
+  if (ver < 3) {
+    // Regenerate missing distribution children (distributions synced from Firestore
+    // may have no child transactions if they were never locally saved on this device)
+    const allDists = await db.distributions.toArray();
+    for (const dist of allDists) {
+      const childCount = await db.transactions.where('distributionId').equals(dist.id).count();
+      if (childCount === 0 && dist.startDate && dist.endDate) {
+        const children = generateDistributionChildren(dist);
+        await db.transactions.bulkAdd(children);
+        const newChildren = await db.transactions.where('distributionId').equals(dist.id).toArray();
+        for (const c of newChildren) {
+          try { await queueWrite('transactions', c.id); } catch {}
+        }
+      }
+    }
+    await setSetting('dataVersion', 3);
   }
 }
 
