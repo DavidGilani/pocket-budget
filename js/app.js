@@ -164,8 +164,9 @@ async function openEntry(type, existingTxn = null) {
     <div class="sheet" id="entry-sheet">
       <div class="sheet-handle"></div>
       <div class="sheet-header">
-        <span class="sheet-title">${existingTxn ? 'Edit' : 'Add'} ${type === 'income' ? 'Income' : 'Expense'}</span>
         <button class="sheet-close" id="entry-close">✕</button>
+        <span class="sheet-title">${existingTxn ? 'Edit' : 'Add'} ${type === 'income' ? 'Income' : 'Expense'}</span>
+        <button class="entry-save-btn" id="entry-save">✓</button>
       </div>
       <div class="sheet-body">
         <div class="entry-amount-display ${state.entryPence === 0 ? 'placeholder' : ''}" id="entry-display">
@@ -213,9 +214,6 @@ async function openEntry(type, existingTxn = null) {
         ${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k => `
           <button class="numpad-key ${k === '⌫' ? 'delete' : ''}" data-key="${k}">${k}</button>
         `).join('')}
-        <button class="numpad-key action" id="entry-save" style="grid-column: 1 / -1">
-          ${existingTxn ? 'Update' : 'Save'}
-        </button>
       </div>
     </div>
   `;
@@ -275,6 +273,60 @@ function updateAmountDisplay(overlay) {
     display.textContent = fmt(state.entryPence / 100);
     display.classList.remove('placeholder');
   }
+}
+
+function addSwipeToDelete(container) {
+  let startX = 0, startY = 0, activeRow = null, tracking = false;
+  const THRESHOLD = 60;
+
+  container.addEventListener('touchstart', e => {
+    const row = e.target.closest('.txn-row[data-txn-id]');
+    if (!row) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    activeRow = row;
+    tracking = false;
+  }, { passive: true });
+
+  container.addEventListener('touchmove', e => {
+    if (!activeRow) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    if (!tracking) {
+      if (Math.abs(dy) > Math.abs(dx)) { activeRow = null; return; }
+      tracking = true;
+    }
+    if (dx < 0) {
+      activeRow.style.transition = 'none';
+      activeRow.style.transform = `translateX(${Math.max(dx, -80)}px)`;
+    }
+  }, { passive: true });
+
+  container.addEventListener('touchend', e => {
+    if (!activeRow || !tracking) return;
+    const dx = e.changedTouches[0].clientX - startX;
+    activeRow.style.transition = 'transform .2s ease';
+    if (dx < -THRESHOLD) {
+      activeRow.style.transform = 'translateX(-72px)';
+      activeRow.dataset.swiped = 'true';
+    } else {
+      activeRow.style.transform = '';
+      delete activeRow.dataset.swiped;
+    }
+    activeRow = null;
+  });
+
+  // Tap anywhere outside a swiped row to reset it
+  container.addEventListener('touchstart', e => {
+    const swiped = container.querySelectorAll('.txn-row[data-swiped]');
+    swiped.forEach(row => {
+      if (!row.contains(e.target)) {
+        row.style.transition = 'transform .2s ease';
+        row.style.transform = '';
+        delete row.dataset.swiped;
+      }
+    });
+  }, { passive: true });
 }
 
 function openDatePicker(currentDate, maxDate, onSelect) {
@@ -494,6 +546,7 @@ async function renderTransactions() {
                         <div class="txn-cat-name">${cat?.name ?? ''}</div>
                       </div>
                       <div class="txn-amount ${t.amount >= 0 ? 'positive' : 'negative'}">${sign}${fmt(Math.abs(t.amount))}</div>
+                      <div class="txn-delete-zone">Delete</div>
                     </div>
                   `;
                 }).join('')}
@@ -510,8 +563,21 @@ async function renderTransactions() {
   txnScreen.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
   txnScreen.querySelector('#txn-search').oninput = e => { state.txnSearchQuery = e.target.value; renderTransactions(); };
   txnScreen.querySelector('#month-picker-btn').onclick = () => showMonthPicker();
-  delegate(txnScreen, 'click', '.txn-row', (e, el) => showTxnMenu(Number(el.dataset.txnId)));
+  delegate(txnScreen, 'click', '.txn-row:not([data-swiped])', (e, el) => {
+    if (!el.dataset.txnId) return;
+    showTxnMenu(Number(el.dataset.txnId));
+  });
+  delegate(txnScreen, 'click', '.txn-delete-zone', async (e, el) => {
+    e.stopPropagation();
+    const row = el.closest('.txn-row');
+    const id = Number(row?.dataset.txnId);
+    if (!id) return;
+    await db.transactions.delete(id);
+    await queueDelete('transactions', id);
+    renderTransactions();
+  });
   delegate(txnScreen, 'click', '.day-add-btn', (e, el) => { state.entryDate = el.dataset.date; openEntry('expense'); });
+  addSwipeToDelete(txnScreen);
 }
 
 async function showMonthPicker() {
@@ -1169,6 +1235,7 @@ async function renderSettings() {
               syncAgo ? `<span class="sync-chip sync-ok">Synced ${syncAgo}</span>` : ''}
           </div>
           <div class="settings-row" id="sync-now-btn"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Sync now</span></div>
+          <div class="settings-row" id="force-upload-btn"><span class="settings-row-icon">⬆️</span><span class="settings-row-label">Force re-upload all to cloud</span></div>
           <div class="settings-row" id="sign-out-btn" style="color:var(--red)"><span class="settings-row-icon">👋</span><span class="settings-row-label" style="color:var(--red)">Sign out</span></div>
         ` : `
           <div style="padding:4px 0 12px;font-size:13px;color:var(--text-2);line-height:1.6">Sign in to sync your data across devices automatically.</div>
@@ -1233,6 +1300,14 @@ async function renderSettings() {
   if (signinBtn) signinBtn.onclick = async () => { try { await signInWithGoogle(); } catch (e) { showToast('Sign-in failed: ' + e.message); } };
   const syncNowBtn = viewContainer.querySelector('#sync-now-btn');
   if (syncNowBtn) syncNowBtn.onclick = async () => { showToast('Syncing…'); await pullFromFirestore(); renderSettings(); };
+  const forceUploadBtn = viewContainer.querySelector('#force-upload-btn');
+  if (forceUploadBtn) forceUploadBtn.onclick = async () => {
+    if (!confirm('This will overwrite cloud data with everything on this device. Use this on the device that has the most complete data. Continue?')) return;
+    showToast('Uploading all data…');
+    await uploadAllToFirestore();
+    showToast('Upload complete — sync on other devices now');
+    renderSettings();
+  };
   const signOutBtn = viewContainer.querySelector('#sign-out-btn');
   if (signOutBtn) signOutBtn.onclick = async () => { await signOutUser(); renderSettings(); };
 }

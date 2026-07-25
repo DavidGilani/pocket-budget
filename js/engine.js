@@ -1,7 +1,7 @@
 // Budget calculation engine
 
 import { db, getSetting } from './db.js';
-import { today, isoDate, addDays, diffDays, daysInMonth, cycleForDate, monthlyEquivalent } from './utils.js';
+import { today, isoDate, addDays, diffDays, daysInMonth, cycleForDate, monthlyEquivalent, dailyEquivalent } from './utils.js';
 
 export async function getCurrentCycle() {
   const startDay = (await getSetting('cycleStartDay')) ?? 1;
@@ -46,11 +46,18 @@ export async function getSavingsTarget() {
 
 export async function calcDailyAllowance(cycleStart, cycleEnd) {
   const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
-  const monthlyIncome    = await getCycleRecurringIncome(cycleStart, cycleEnd);
-  const monthlyExpenses  = await getCycleRecurringExpenses(cycleStart, cycleEnd);
-  const monthlySavings   = await getSavingsTarget();
+  const monthlyIncome   = await getCycleRecurringIncome(cycleStart, cycleEnd);
+  const monthlyExpenses = await getCycleRecurringExpenses(cycleStart, cycleEnd);
+  const monthlySavings  = await getSavingsTarget();
   const available = monthlyIncome - monthlyExpenses - monthlySavings;
-  const dailyAllowance = available / cycleLen;
+
+  // Use per-frequency daily rates so yearly expenses use amount/365, not amount/12/cycleLen
+  const expRows = await db.recurringExpenses.where('startDate').belowOrEqual(cycleEnd).toArray();
+  const dailyExpenses = expRows
+    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart))
+    .reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
+
+  const dailyAllowance = monthlyIncome / cycleLen - dailyExpenses - monthlySavings / cycleLen;
   return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen };
 }
 
