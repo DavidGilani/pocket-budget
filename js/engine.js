@@ -17,16 +17,31 @@ function inCycle(r, cycleStart, cycleEnd) {
   return r.startDate <= cycleEnd && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart);
 }
 
+// Days the item actually overlaps with the cycle (for pro-rata partial-month items)
+function overlapDays(r, cycleStart, cycleEnd) {
+  const effStart = r.startDate > cycleStart ? r.startDate : cycleStart;
+  const effEnd = (!r.endDate || r.endDate === '4001-01-01' || r.endDate > cycleEnd) ? cycleEnd : r.endDate;
+  return Math.max(0, diffDays(effStart, effEnd) + 1);
+}
+
+// Pro-rated daily contribution: full daily rate × (active days / cycle days)
+function proratedDaily(r, cycleStart, cycleEnd, cycleLen) {
+  const overlap = overlapDays(r, cycleStart, cycleEnd);
+  return dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen) * overlap / cycleLen;
+}
+
 export async function getCycleRecurringIncome(cycleStart, cycleEnd) {
+  const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
   const rows = await db.recurringIncome.where('startDate').belowOrEqual(cycleEnd).toArray();
   return rows.filter(r => inCycle(r, cycleStart, cycleEnd))
-    .reduce((sum, r) => sum + (r.amount ?? 0), 0);
+    .reduce((sum, r) => sum + proratedDaily(r, cycleStart, cycleEnd, cycleLen) * cycleLen, 0);
 }
 
 export async function getCycleRecurringExpenses(cycleStart, cycleEnd) {
+  const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
   const rows = await db.recurringExpenses.where('startDate').belowOrEqual(cycleEnd).toArray();
   return rows.filter(r => inCycle(r, cycleStart, cycleEnd))
-    .reduce((sum, r) => sum + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
+    .reduce((sum, r) => sum + proratedDaily(r, cycleStart, cycleEnd, cycleLen) * cycleLen, 0);
 }
 
 export async function getSavingsTarget(forDate) {
@@ -46,11 +61,11 @@ export async function calcDailyAllowance(cycleStart, cycleEnd) {
   const monthlySavings  = await getSavingsTarget(cycleStart);
   const available = monthlyIncome - monthlyExpenses - monthlySavings;
 
-  // Use per-frequency daily rates so yearly expenses use amount/365, not amount/12/cycleLen
+  // Pro-rated daily: items active only part of the cycle contribute proportionally
   const expRows = await db.recurringExpenses.where('startDate').belowOrEqual(cycleEnd).toArray();
   const dailyExpenses = expRows
     .filter(r => inCycle(r, cycleStart, cycleEnd))
-    .reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
+    .reduce((s, r) => s + proratedDaily(r, cycleStart, cycleEnd, cycleLen), 0);
 
   const dailyAllowance = monthlyIncome / cycleLen - dailyExpenses - monthlySavings / cycleLen;
   return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen, dailyExpenses };

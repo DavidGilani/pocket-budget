@@ -707,9 +707,16 @@ async function showTxnMenu(id) {
   document.body.appendChild(overlay);
   overlay.querySelector('#txn-menu-close').onclick = () => overlay.remove();
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-  overlay.querySelector('#txn-edit-btn').onclick = async () => { overlay.remove(); openEntry(txn.amount >= 0 ? 'income' : 'expense', txn); };
+  overlay.querySelector('#txn-edit-btn').onclick = async () => {
+    overlay.remove();
+    if (txn.distributionId) {
+      const dist = await db.distributions.get(txn.distributionId);
+      if (dist) { navigate(dist.isIncome ? 'extraIncomes' : 'distributions'); return; }
+    }
+    openEntry(txn.amount >= 0 ? 'income' : 'expense', txn);
+  };
   overlay.querySelector('#txn-del-btn').onclick = async () => {
-    if (txn.distributionId) { showToast('Edit the parent distribution to modify this entry'); overlay.remove(); return; }
+    if (txn.distributionId) { showToast('Open the parent Big Expense or Extra Income to delete'); overlay.remove(); return; }
     await db.transactions.delete(id);
     await queueDelete('transactions', id);
     overlay.remove();
@@ -725,24 +732,11 @@ async function renderBreakdown() {
 
   const cycleLen = diffDays(cycle.start, cycle.end) + 1;
 
-  // Fetch active recurring expenses for this cycle so we can list them individually
-  const activeRecExp = (await db.recurringExpenses.where('startDate').belowOrEqual(cycle.end).toArray())
-    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycle.start))
-    .sort((a, b) => dailyEquivalent(b.amount, b.frequency ?? 'monthly', cycleLen) - dailyEquivalent(a.amount, a.frequency ?? 'monthly', cycleLen));
-
-  const recExpSubs = activeRecExp.map(r => {
-    const daily = dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen);
-    const monthly = daily * cycleLen;
-    return { label: r.description, amount: monthly, daily };
-  });
-
   const rows = [
     { icon: '💰', bg: '#e8f5e9', label: 'Income', amount: bd.totalIncome, daily: bd.regularIncome / cycleLen, amountClass: 'text-green',
-      subs: [{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Variable income', amount: bd.variableIncome }] },
+      subs: [{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Extra income', amount: bd.variableIncome }] },
     { icon: '🛒', bg: '#ffebee', label: 'Expenses', amount: bd.totalExpenses, daily: bd.recurringExpenses / cycleLen, amountClass: 'text-red',
-      subs: recExpSubs.length
-        ? [...recExpSubs, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }]
-        : [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
+      subs: [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
     { icon: '💛', bg: '#fffde7', label: 'Savings', amount: bd.savings, daily: bd.savings / cycleLen, amountClass: '', subs: [] },
     { icon: '📊', bg: '#e3f2fd', label: 'Budget left', amount: bd.budgetLeft, daily: null, amountClass: bd.budgetLeft >= 0 ? 'text-green' : 'text-red', subs: [] },
   ];
@@ -1286,6 +1280,8 @@ async function openSavingsSheet() {
 
   const openEditor = (target) => {
     const isNew = !target;
+    let editorPence = Math.round((target?.amount ?? 0) * 100);
+
     const eOverlay = document.createElement('div');
     eOverlay.className = 'sheet-overlay';
     eOverlay.innerHTML = `
@@ -1296,16 +1292,18 @@ async function openSavingsSheet() {
           <button class="sheet-close" id="sav-e-close">✕</button>
         </div>
         <div class="sheet-body" style="padding:16px">
-          <div class="form-group"><label class="form-label">Amount (£/month)</label>
-            <input class="form-input" id="sav-e-amount" type="number" step="50" min="0" value="${target?.amount ?? ''}" placeholder="0"></div>
+          <div class="form-group">
+            <label class="form-label">Amount (£/month)</label>
+            <div class="form-input" id="sav-e-amount-display" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:17px;font-weight:600;color:var(--text)">
+              <span id="sav-e-amount-val">${editorPence > 0 ? fmt(editorPence / 100) : '£0.00'}</span>
+              <span style="color:var(--text-2);font-size:18px">›</span>
+            </div>
+          </div>
           <div class="form-group"><label class="form-label">Start date</label>
             <input class="form-input" id="sav-e-start" type="date" value="${target?.startDate ?? today()}"></div>
           <div class="form-group"><label class="form-label">End date (leave blank = open-ended)</label>
             <input class="form-input" id="sav-e-end" type="date" value="${(target?.endDate && target.endDate !== '4001-01-01') ? target.endDate : ''}"></div>
           <div style="background:var(--bg);border-radius:var(--radius-sm);padding:12px;font-size:13px;line-height:2;color:var(--text-2)" id="sav-e-stats">
-            <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
-            <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
-            <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
           </div>
           <div style="display:flex;gap:8px;margin-top:16px;padding-bottom:20px">
             ${!isNew ? `<button class="btn btn-danger" id="sav-e-del">Delete</button>` : ''}
@@ -1315,8 +1313,81 @@ async function openSavingsSheet() {
       </div>
     `;
     document.body.appendChild(eOverlay);
+
+    function updateStats() {
+      const amount = editorPence / 100;
+      const pctIncome = monthlyIncome > 0 ? (amount / monthlyIncome * 100).toFixed(1) : '—';
+      const pctTakeHome = takeHome > 0 ? (amount / takeHome * 100).toFixed(1) : '—';
+      eOverlay.querySelector('#sav-e-stats').innerHTML = `
+        <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
+        <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:4px;padding-top:4px"><span>% of income</span><span>${pctIncome}%</span></div>
+        <div style="display:flex;justify-content:space-between"><span>% of take-home</span><span>${pctTakeHome}%</span></div>
+      `;
+    }
+    updateStats();
+
     eOverlay.onclick = e => { if (e.target === eOverlay) eOverlay.remove(); };
     eOverlay.querySelector('#sav-e-close').onclick = () => eOverlay.remove();
+
+    eOverlay.querySelector('#sav-e-amount-display').onclick = () => {
+      const nOverlay = document.createElement('div');
+      nOverlay.className = 'sheet-overlay';
+      let npPence = editorPence;
+      nOverlay.innerHTML = `
+        <div class="sheet">
+          <div class="sheet-handle"></div>
+          <div class="sheet-header">
+            <span class="sheet-title">Monthly savings amount</span>
+            <button class="sheet-close" id="sav-np-close">✕</button>
+          </div>
+          <div class="sheet-body">
+            <div class="entry-amount-display ${npPence === 0 ? 'placeholder' : ''}" id="sav-np-display">
+              ${npPence > 0 ? fmt(npPence / 100) : '£0.00'}
+            </div>
+          </div>
+          <div class="numpad">
+            ${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k => `
+              <button class="numpad-key ${k === '⌫' ? 'delete' : ''}" data-key="${k}">${k}</button>
+            `).join('')}
+          </div>
+          <div style="padding:12px 16px 24px">
+            <button class="btn btn-primary btn-full" id="sav-np-ok">Done</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(nOverlay);
+      nOverlay.onclick = e => { if (e.target === nOverlay) nOverlay.remove(); };
+      nOverlay.querySelector('#sav-np-close').onclick = () => nOverlay.remove();
+
+      function refreshDisplay() {
+        const el = nOverlay.querySelector('#sav-np-display');
+        el.textContent = npPence > 0 ? fmt(npPence / 100) : '£0.00';
+        el.className = 'entry-amount-display' + (npPence === 0 ? ' placeholder' : '');
+      }
+
+      delegate(nOverlay, 'click', '.numpad-key', (e, el) => {
+        const key = el.dataset.key;
+        if (key === '⌫') {
+          npPence = Math.floor(npPence / 10);
+        } else if (key !== '.') {
+          const next = npPence * 10 + parseInt(key);
+          if (next <= 9999999) npPence = next;
+        }
+        el.classList.add('pressed');
+        setTimeout(() => el.classList.remove('pressed'), 120);
+        refreshDisplay();
+      });
+
+      nOverlay.querySelector('#sav-np-ok').onclick = () => {
+        editorPence = npPence;
+        eOverlay.querySelector('#sav-e-amount-val').textContent = editorPence > 0 ? fmt(editorPence / 100) : '£0.00';
+        updateStats();
+        nOverlay.remove();
+      };
+    };
+
     if (!isNew) {
       eOverlay.querySelector('#sav-e-del').onclick = async () => {
         if (!confirm('Delete this savings target?')) return;
@@ -1327,11 +1398,11 @@ async function openSavingsSheet() {
       };
     }
     eOverlay.querySelector('#sav-e-save').onclick = async () => {
-      const amount = parseFloat(eOverlay.querySelector('#sav-e-amount').value);
+      const amount = editorPence / 100;
       const startDate = eOverlay.querySelector('#sav-e-start').value;
       const endRaw = eOverlay.querySelector('#sav-e-end').value;
       const endDate = endRaw || '4001-01-01';
-      if (isNaN(amount) || amount < 0) { showToast('Enter a valid amount'); return; }
+      if (amount < 0) { showToast('Enter a valid amount'); return; }
       if (!startDate) { showToast('Enter a start date'); return; }
       if (isNew) {
         const id = await db.savingsTargets.add({ amount, startDate, endDate, createdAt: new Date().toISOString() });
@@ -1425,7 +1496,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v12)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v13)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
