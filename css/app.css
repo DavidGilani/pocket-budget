@@ -89,6 +89,7 @@ html, body {
   position: relative;
   color: white;
 }
+.balance-screen.negative { background: linear-gradient(160deg, var(--coral) 0%, var(--coral-light) 100%); }
 
 .balance-header {
   display: flex;
