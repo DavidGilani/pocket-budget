@@ -1,6 +1,6 @@
 // Pocket Ledger Service Worker
 
-const CACHE = 'pocket-ledger-v1';
+const CACHE = 'pocket-ledger-v2';
 const APP_SHELL = [
   './',
   './index.html',
@@ -9,6 +9,8 @@ const APP_SHELL = [
   './js/engine.js',
   './js/utils.js',
   './js/app.js',
+  './js/firebase.js',
+  './js/sync.js',
   './manifest.json',
   './icons/icon-192.svg',
   './icons/icon-512.svg',
