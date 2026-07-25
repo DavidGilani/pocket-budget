@@ -50,7 +50,7 @@ export async function calcDailyAllowance(cycleStart, cycleEnd) {
   const monthlyExpenses  = await getCycleRecurringExpenses(cycleStart, cycleEnd);
   const monthlySavings   = await getSavingsTarget();
   const available = monthlyIncome - monthlyExpenses - monthlySavings;
-  const dailyAllowance = (available * cycleLen / 30) / cycleLen;
+  const dailyAllowance = available / cycleLen;
   return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen };
 }
 
@@ -144,16 +144,16 @@ export async function getCycleBreakdown(cycleStart, cycleEnd) {
   }
 
   const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
-  const totalRecurringExpenses = monthlyExpenses * cycleLen / 30;
+  const totalRecurringExpenses = monthlyExpenses;
   const totalIncome = monthlyIncome + variableIncome;
   const totalExpenses = totalRecurringExpenses + variableExpenses + distributionExpenses;
-  const budgetSpent = totalRecurringExpenses + monthlySavings * cycleLen / 30;
-  const budgetLeft = totalIncome - totalExpenses - monthlySavings * cycleLen / 30;
+  const budgetSpent = totalRecurringExpenses + monthlySavings;
+  const budgetLeft = totalIncome - totalExpenses - monthlySavings;
 
   return {
     totalIncome, regularIncome: monthlyIncome, variableIncome,
     totalExpenses, recurringExpenses: totalRecurringExpenses, variableExpenses, distributionExpenses,
-    savings: monthlySavings * cycleLen / 30,
+    savings: monthlySavings,
     budgetLeft,
     dailyAllowance,
   };
