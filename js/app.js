@@ -212,18 +212,6 @@ async function openEntry(type, existingTxn = null) {
           <span style="color:var(--text-2);font-size:18px">›</span>
         </div>
 
-        <div class="cat-grid" id="cat-grid" style="display:none">
-          ${cats.map(c => `
-            <div class="cat-item ${state.entryCategory === c.id ? 'selected' : ''}"
-                 data-cat="${c.id}" data-cat-name="${c.name}" data-cat-icon="${c.icon}">
-              <div class="cat-icon" style="background:${c.colour}20; color:${c.colour}">
-                ${c.icon}
-              </div>
-              <div class="cat-name">${c.name}</div>
-            </div>
-          `).join('')}
-        </div>
-
         <div class="entry-fields">
           <div class="entry-field" id="date-field" style="cursor:pointer">
             <span class="entry-field-icon">📅</span>
@@ -253,18 +241,14 @@ async function openEntry(type, existingTxn = null) {
   overlay.querySelector('#entry-close').onclick = closeEntry;
 
   overlay.querySelector('#cat-collapsed').onclick = () => {
-    const grid = overlay.querySelector('#cat-grid');
-    grid.style.display = grid.style.display === 'none' ? '' : 'none';
+    openCategoryPicker(cats, state.entryCategory, (catId, catName, catIcon) => {
+      state.entryCategory = catId;
+      overlay.querySelector('#cat-preview').innerHTML = catId
+        ? `<span style="margin-right:4px">${catIcon}</span>${catName}`
+        : '<span style="color:var(--text-2)">None</span>';
+      setupNoteAutocomplete(overlay);
+    });
   };
-
-  delegate(overlay, 'click', '.cat-item', (e, el) => {
-    overlay.querySelectorAll('.cat-item').forEach(i => i.classList.remove('selected'));
-    el.classList.add('selected');
-    state.entryCategory = Number(el.dataset.cat);
-    overlay.querySelector('#cat-preview').innerHTML = `<span style="margin-right:4px">${el.dataset.catIcon}</span>${el.dataset.catName}`;
-    overlay.querySelector('#cat-grid').style.display = 'none';
-    setupNoteAutocomplete(overlay);
-  });
 
   delegate(overlay, 'click', '.numpad-key:not(.action)', (e, el) => {
     const key = el.dataset.key;
@@ -411,13 +395,51 @@ function openDatePicker(currentDate, maxDate, onSelect) {
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
 }
 
+function openCategoryPicker(cats, currentCatId, onSelect) {
+  const pickerOverlay = document.createElement('div');
+  pickerOverlay.className = 'sheet-overlay';
+  pickerOverlay.innerHTML = `
+    <div class="sheet" style="max-height:70vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Category</span>
+        <button class="sheet-close" id="cat-pick-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:12px;overflow-y:auto">
+        <div class="cat-grid" style="display:grid">
+          <div class="cat-item ${!currentCatId ? 'selected' : ''}" data-cat="" data-cat-name="" data-cat-icon="">
+            <div class="cat-icon" style="background:#f0f0f0;color:#999">✕</div>
+            <div class="cat-name">None</div>
+          </div>
+          ${cats.map(c => `
+            <div class="cat-item ${currentCatId === c.id ? 'selected' : ''}"
+                 data-cat="${c.id}" data-cat-name="${c.name}" data-cat-icon="${c.icon}">
+              <div class="cat-icon" style="background:${c.colour}20;color:${c.colour}">${c.icon}</div>
+              <div class="cat-name">${c.name}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(pickerOverlay);
+  pickerOverlay.querySelector('#cat-pick-close').onclick = () => pickerOverlay.remove();
+  pickerOverlay.onclick = e => { if (e.target === pickerOverlay) pickerOverlay.remove(); };
+  delegate(pickerOverlay, 'click', '.cat-item', (e, el) => {
+    const catId = el.dataset.cat ? Number(el.dataset.cat) : null;
+    onSelect(catId, el.dataset.catName, el.dataset.catIcon);
+    pickerOverlay.remove();
+  });
+}
+
 async function setupNoteAutocomplete(overlay) {
   const noteInput = overlay.querySelector('#entry-note');
   const suggestEl = overlay.querySelector('#note-suggestions');
   if (!noteInput || !suggestEl || !state.entryCategory) return;
 
+  const cutoff = addDays(today(), -365);
   const pastTxns = await db.transactions
-    .filter(t => t.categoryId === state.entryCategory && t.note && t.note.trim())
+    .filter(t => t.categoryId === state.entryCategory && t.note && t.note.trim() && t.date >= cutoff)
     .toArray();
   const freq = {};
   for (const t of pastTxns) { const n = t.note.trim(); freq[n] = (freq[n] ?? 0) + 1; }
@@ -702,11 +724,25 @@ async function renderBreakdown() {
   const bd = await getCycleBreakdown(cycle.start, cycle.end);
 
   const cycleLen = diffDays(cycle.start, cycle.end) + 1;
+
+  // Fetch active recurring expenses for this cycle so we can list them individually
+  const activeRecExp = (await db.recurringExpenses.where('startDate').belowOrEqual(cycle.end).toArray())
+    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycle.start))
+    .sort((a, b) => dailyEquivalent(b.amount, b.frequency ?? 'monthly', cycleLen) - dailyEquivalent(a.amount, a.frequency ?? 'monthly', cycleLen));
+
+  const recExpSubs = activeRecExp.map(r => {
+    const daily = dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen);
+    const monthly = daily * cycleLen;
+    return { label: r.description, amount: monthly, daily };
+  });
+
   const rows = [
     { icon: '💰', bg: '#e8f5e9', label: 'Income', amount: bd.totalIncome, daily: bd.regularIncome / cycleLen, amountClass: 'text-green',
       subs: [{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Variable income', amount: bd.variableIncome }] },
     { icon: '🛒', bg: '#ffebee', label: 'Expenses', amount: bd.totalExpenses, daily: bd.recurringExpenses / cycleLen, amountClass: 'text-red',
-      subs: [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
+      subs: recExpSubs.length
+        ? [...recExpSubs, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }]
+        : [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
     { icon: '💛', bg: '#fffde7', label: 'Savings', amount: bd.savings, daily: bd.savings / cycleLen, amountClass: '', subs: [] },
     { icon: '📊', bg: '#e3f2fd', label: 'Budget left', amount: bd.budgetLeft, daily: null, amountClass: bd.budgetLeft >= 0 ? 'text-green' : 'text-red', subs: [] },
   ];
@@ -743,7 +779,10 @@ async function renderBreakdown() {
               <div class="breakdown-sub-rows">
                 <div class="breakdown-sub-row">
                   <span class="breakdown-sub-label">${s.label}</span>
-                  <span class="breakdown-sub-amount">${fmt(Math.abs(s.amount))}</span>
+                  <span class="breakdown-sub-amount">
+                    ${fmt(Math.abs(s.amount))}
+                    ${s.daily != null ? `<span style="font-size:10px;color:var(--text-2);margin-left:4px">${fmt(Math.abs(s.daily))}/d</span>` : ''}
+                  </span>
                 </div>
               </div>
             `).join('')}
