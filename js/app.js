@@ -56,7 +56,7 @@ async function renderView(view) {
       case 'transactions': await renderTransactions(); break;
       case 'analysis':     await renderAnalysis(); break;
       case 'breakdown':    await renderBreakdown(); break;
-      case 'recurring':    await renderRecurring(); break;
+      case 'recurring':    state.recurringCycle = null; await renderRecurring(); break;
       case 'distributions':await renderDistributions(); break;
       case 'extraIncomes': await renderExtraIncomes(); break;
       case 'accounts':     await renderAccounts(); break;
@@ -811,17 +811,17 @@ async function renderBreakdown() {
 
 async function renderRecurring() {
   const tab = state.recurringTab;
-  const cycle = await getCurrentCycle();
+  if (!state.recurringCycle) state.recurringCycle = await getCurrentCycle();
+  const cycle = state.recurringCycle;
   const cycleLen = diffDays(cycle.start, cycle.end) + 1;
+  const isCurrentCycle = cycle.start === (await getCurrentCycle()).start;
+
+  const activeFilter = r => r.startDate <= cycle.end && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycle.start);
   let items;
   if (tab === 'expenses') {
-    items = await db.recurringExpenses
-      .filter(r => r.isActive && r.startDate <= cycle.end && (r.endDate == null || r.endDate >= cycle.start || r.endDate === '4001-01-01'))
-      .toArray();
+    items = (await db.recurringExpenses.toArray()).filter(activeFilter);
   } else {
-    items = await db.recurringIncome
-      .filter(r => r.isActive && r.startDate <= cycle.end && (r.endDate == null || r.endDate >= cycle.start || r.endDate === '4001-01-01'))
-      .toArray();
+    items = (await db.recurringIncome.toArray()).filter(activeFilter);
   }
 
   items.sort((a, b) => monthlyEquivalent(b.amount ?? 0, b.frequency ?? 'monthly') - monthlyEquivalent(a.amount ?? 0, a.frequency ?? 'monthly'));
@@ -829,11 +829,13 @@ async function renderRecurring() {
   const totalMonthly = items.reduce((s, r) => s + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
   const totalDaily = items.reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
 
+  const cycleLabel = new Date(cycle.start + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
   const formatMeta = r => {
     const start = r.startDate ? fmtDate(r.startDate) : '-';
     const end = (!r.endDate || r.endDate === '4001-01-01') ? 'open end' : fmtDate(r.endDate);
     const freq = (r.frequency ?? 'monthly').charAt(0).toUpperCase() + (r.frequency ?? 'monthly').slice(1);
-    return `${fmt(r.amount)} (${freq}) ${start} - ${end}`;
+    return `${fmt(r.amount)} (${freq}) ${start} – ${end}`;
   };
 
   const heroColor = tab === 'income' ? 'linear-gradient(160deg,#2b82e8 0%,#4db8f7 100%)' : 'linear-gradient(160deg,var(--coral) 0%,var(--coral-light) 100%)';
@@ -848,6 +850,11 @@ async function renderRecurring() {
         <div class="recurring-hero-total">Total</div>
         <div class="recurring-hero-amount">${fmt(totalDaily)}<span style="font-size:16px;opacity:0.7"> /day</span></div>
         <div style="font-size:13px;opacity:0.8">${fmt(totalMonthly)}/month</div>
+        <div class="breakdown-cycle-nav" style="background:rgba(0,0,0,0.15);border-radius:20px;margin:8px auto 0;width:fit-content;padding:2px 4px">
+          <button class="cycle-nav-btn" id="rec-cycle-prev" style="color:white;opacity:0.9">&lt;</button>
+          <span style="color:white;font-size:13px;min-width:130px;text-align:center">${cycleLabel}</span>
+          <button class="cycle-nav-btn" id="rec-cycle-next" style="color:white;opacity:0.9;visibility:${isCurrentCycle ? 'hidden' : 'visible'}">&gt;</button>
+        </div>
       </div>
       <div class="tab-bar" style="background:${tabBg};border-bottom:none;padding:0 12px 12px">
         <button class="chip ${tab === 'expenses' ? 'active' : ''}" id="tab-exp"
@@ -881,8 +888,21 @@ async function renderRecurring() {
   const recScreen = viewContainer.firstElementChild;
   recScreen.querySelector('#tab-exp').onclick = () => { state.recurringTab = 'expenses'; renderRecurring(); };
   recScreen.querySelector('#tab-inc').onclick = () => { state.recurringTab = 'income'; renderRecurring(); };
-  recScreen.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
-  delegate(recScreen, 'click', '.recurring-card', (e, el) => openRecurringEditor(Number(el.dataset.recId), el.dataset.recType));
+  recScreen.querySelector('#rec-cycle-prev').onclick = () => {
+    const [y, m] = cycle.start.split('-').map(Number);
+    state.recurringCycle = cycleForDate(isoDate(new Date(y, m - 2, 1)));
+    renderRecurring();
+  };
+  recScreen.querySelector('#rec-cycle-next').onclick = () => {
+    const [y, m] = cycle.start.split('-').map(Number);
+    const next = isoDate(new Date(y, m, 1));
+    if (next <= today()) { state.recurringCycle = cycleForDate(next); renderRecurring(); }
+  };
+  if (isCurrentCycle) recScreen.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
+  else recScreen.querySelector('#rec-add-btn').style.display = 'none';
+  delegate(recScreen, 'click', '.recurring-card', (e, el) => {
+    if (isCurrentCycle) openRecurringEditor(Number(el.dataset.recId), el.dataset.recType);
+  });
 }
 
 async function openRecurringEditor(id, type) {
@@ -1226,66 +1246,117 @@ async function openSnapshotEntry(accounts, latest) {
 }
 
 async function openSavingsSheet() {
-  const [savings, cycle] = await Promise.all([getSetting('savingsAmount') ?? 1500, getCurrentCycle()]);
+  const targets = (await db.savingsTargets.toArray()).sort((a, b) => b.startDate.localeCompare(a.startDate));
+  const cycle = await getCurrentCycle();
   const { monthlyIncome, monthlyExpenses } = await calcDailyAllowance(cycle.start, cycle.end);
   const takeHome = monthlyIncome - monthlyExpenses;
 
-  const pctIncome = monthlyIncome > 0 ? ((savings / monthlyIncome) * 100).toFixed(1) : 0;
-  const pctTakeHome = takeHome > 0 ? ((savings / takeHome) * 100).toFixed(1) : 0;
+  function renderTargetList() {
+    const listEl = overlay.querySelector('#sav-list');
+    listEl.innerHTML = targets.length === 0
+      ? `<div style="padding:16px;text-align:center;color:var(--text-2);font-size:14px">No savings targets yet</div>`
+      : targets.map((t, i) => {
+          const endLabel = (!t.endDate || t.endDate === '4001-01-01') ? 'open-ended' : fmtDate(t.endDate);
+          return `<div class="settings-row" data-sav-idx="${i}" style="cursor:pointer">
+            <div style="flex:1">
+              <div style="font-size:15px;font-weight:500">${fmt(t.amount ?? 0)}/month</div>
+              <div style="font-size:12px;color:var(--text-2)">${fmtDate(t.startDate)} – ${endLabel}</div>
+            </div>
+            <span class="settings-row-chevron">›</span>
+          </div>`;
+        }).join('');
+  }
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
   overlay.innerHTML = `
-    <div class="sheet">
+    <div class="sheet" style="max-height:80vh">
       <div class="sheet-handle"></div>
-      <div class="sheet-header"><span class="sheet-title">Monthly Savings Target</span><button class="sheet-close" id="sav-close">✕</button></div>
-      <div class="sheet-body" style="padding:16px">
-        <div class="form-group">
-          <label class="form-label">Target amount (£)</label>
-          <input class="form-input" id="sav-amount" type="number" step="50" min="0" value="${savings}" placeholder="0">
-        </div>
-        <div id="sav-stats" style="background:var(--bg);border-radius:var(--radius-sm);padding:14px;margin-top:4px;font-size:13px;line-height:2;color:var(--text-2)">
-          <div style="display:flex;justify-content:space-between"><span>% of monthly income</span><span style="color:var(--text);font-weight:600">${pctIncome}%</span></div>
-          <div style="display:flex;justify-content:space-between"><span>% of take-home (after expenses)</span><span style="color:var(--text);font-weight:600">${pctTakeHome}%</span></div>
-          <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
-          <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
-          <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
-        </div>
-        <button class="btn btn-primary btn-full" id="sav-save" style="margin-top:16px;margin-bottom:20px">Save</button>
+      <div class="sheet-header">
+        <span class="sheet-title">Savings Targets</span>
+        <button class="sheet-close" id="sav-close">✕</button>
       </div>
+      <div style="padding:0 12px 8px">
+        <button class="btn btn-primary btn-full" id="sav-add-btn">+ Add target</button>
+      </div>
+      <div id="sav-list" style="overflow-y:auto"></div>
     </div>
   `;
   document.body.appendChild(overlay);
+  renderTargetList();
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
   overlay.querySelector('#sav-close').onclick = () => overlay.remove();
 
-  const amtInput = overlay.querySelector('#sav-amount');
-  const statsDiv = overlay.querySelector('#sav-stats');
-  amtInput.oninput = () => {
-    const v = parseFloat(amtInput.value) || 0;
-    const pi = monthlyIncome > 0 ? ((v / monthlyIncome) * 100).toFixed(1) : 0;
-    const pt = takeHome > 0 ? ((v / takeHome) * 100).toFixed(1) : 0;
-    statsDiv.innerHTML = `
-      <div style="display:flex;justify-content:space-between"><span>% of monthly income</span><span style="color:var(--text);font-weight:600">${pi}%</span></div>
-      <div style="display:flex;justify-content:space-between"><span>% of take-home (after expenses)</span><span style="color:var(--text);font-weight:600">${pt}%</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
+  const openEditor = (target) => {
+    const isNew = !target;
+    const eOverlay = document.createElement('div');
+    eOverlay.className = 'sheet-overlay';
+    eOverlay.innerHTML = `
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">${isNew ? 'Add' : 'Edit'} Savings Target</span>
+          <button class="sheet-close" id="sav-e-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:16px">
+          <div class="form-group"><label class="form-label">Amount (£/month)</label>
+            <input class="form-input" id="sav-e-amount" type="number" step="50" min="0" value="${target?.amount ?? ''}" placeholder="0"></div>
+          <div class="form-group"><label class="form-label">Start date</label>
+            <input class="form-input" id="sav-e-start" type="date" value="${target?.startDate ?? today()}"></div>
+          <div class="form-group"><label class="form-label">End date (leave blank = open-ended)</label>
+            <input class="form-input" id="sav-e-end" type="date" value="${(target?.endDate && target.endDate !== '4001-01-01') ? target.endDate : ''}"></div>
+          <div style="background:var(--bg);border-radius:var(--radius-sm);padding:12px;font-size:13px;line-height:2;color:var(--text-2)" id="sav-e-stats">
+            <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
+            <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
+            <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px;padding-bottom:20px">
+            ${!isNew ? `<button class="btn btn-danger" id="sav-e-del">Delete</button>` : ''}
+            <button class="btn btn-primary" id="sav-e-save" style="flex:1">${isNew ? 'Add' : 'Update'}</button>
+          </div>
+        </div>
+      </div>
     `;
+    document.body.appendChild(eOverlay);
+    eOverlay.onclick = e => { if (e.target === eOverlay) eOverlay.remove(); };
+    eOverlay.querySelector('#sav-e-close').onclick = () => eOverlay.remove();
+    if (!isNew) {
+      eOverlay.querySelector('#sav-e-del').onclick = async () => {
+        if (!confirm('Delete this savings target?')) return;
+        await db.savingsTargets.delete(target.id);
+        try { await queueDelete('savingsTargets', target.id); } catch {}
+        targets.splice(targets.indexOf(target), 1);
+        eOverlay.remove(); renderTargetList();
+      };
+    }
+    eOverlay.querySelector('#sav-e-save').onclick = async () => {
+      const amount = parseFloat(eOverlay.querySelector('#sav-e-amount').value);
+      const startDate = eOverlay.querySelector('#sav-e-start').value;
+      const endRaw = eOverlay.querySelector('#sav-e-end').value;
+      const endDate = endRaw || '4001-01-01';
+      if (isNaN(amount) || amount < 0) { showToast('Enter a valid amount'); return; }
+      if (!startDate) { showToast('Enter a start date'); return; }
+      if (isNew) {
+        const id = await db.savingsTargets.add({ amount, startDate, endDate, createdAt: new Date().toISOString() });
+        try { await queueWrite('savingsTargets', id); } catch {}
+        targets.unshift(await db.savingsTargets.get(id));
+      } else {
+        await db.savingsTargets.update(target.id, { amount, startDate, endDate });
+        try { await queueWrite('savingsTargets', target.id); } catch {}
+        Object.assign(target, { amount, startDate, endDate });
+        targets.sort((a, b) => b.startDate.localeCompare(a.startDate));
+      }
+      eOverlay.remove(); renderTargetList();
+      showToast(isNew ? 'Savings target added' : 'Savings target updated');
+    };
   };
-  overlay.querySelector('#sav-save').onclick = async () => {
-    const v = parseFloat(amtInput.value);
-    if (isNaN(v) || v < 0) { showToast('Enter a valid amount'); return; }
-    await setSetting('savingsAmount', v);
-    try { await queueWrite('settings', 'savingsAmount'); } catch {}
-    overlay.remove();
-    showToast('Savings target updated');
-    if (state.view === 'settings') renderSettings();
-  };
+
+  overlay.querySelector('#sav-add-btn').onclick = () => openEditor(null);
+  delegate(overlay, 'click', '[data-sav-idx]', (e, el) => openEditor(targets[Number(el.dataset.savIdx)]));
 }
 
 async function renderSettings() {
-  const savings = await getSetting('savingsAmount') ?? 1500;
+  const activeSavings = await getSavingsTarget();
   const user = state.currentUser;
   const ss = syncState;
   const lastSync = await getSetting('lastSyncAt');
@@ -1345,7 +1416,7 @@ async function renderSettings() {
       <div class="settings-section">
         <div class="settings-section-title">Savings</div>
         <div class="settings-card">
-          <div class="settings-row" id="savings-target-row" style="cursor:pointer"><span class="settings-row-icon">💛</span><span class="settings-row-label">Monthly savings target</span><span style="color:var(--text-2);font-size:14px;margin-left:auto">${fmt(savings)}</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="savings-target-row" style="cursor:pointer"><span class="settings-row-icon">💛</span><span class="settings-row-label">Savings targets</span><span style="color:var(--text-2);font-size:14px;margin-left:auto">${fmt(activeSavings)}/mo now</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">

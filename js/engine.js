@@ -32,9 +32,6 @@ export async function getCycleRecurringExpenses(cycleStart, cycleEnd) {
 }
 
 export async function getSavingsTarget() {
-  const override = await getSetting('savingsAmount');
-  if (override != null) return Number(override);
-
   const now = today();
   const targets = await db.savingsTargets
     .filter(t => t.startDate <= now && (t.endDate == null || t.endDate >= now || t.endDate === '4001-01-01'))
