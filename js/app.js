@@ -22,6 +22,7 @@ const state = {
   viewingCycle: null,
   pendingSync: 0,
   currentUser: null,
+  txnMonth: null,
 };
 
 const viewContainer = document.getElementById('view');
@@ -44,6 +45,7 @@ async function renderView(view) {
       case 'breakdown':    await renderBreakdown(); break;
       case 'recurring':    await renderRecurring(); break;
       case 'distributions':await renderDistributions(); break;
+      case 'extraIncomes': await renderExtraIncomes(); break;
       case 'accounts':     await renderAccounts(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
@@ -88,7 +90,7 @@ async function renderBalance() {
   const pendingCount = await db.syncQueue.where('status').equals('pending').count();
 
   viewContainer.innerHTML = `
-    <div class="balance-screen">
+    <div class="balance-screen ${todayBal < 0 ? 'negative' : ''}">
       ${pendingCount > 0 ? `<div class="sync-banner">${pendingCount} change${pendingCount > 1 ? 's' : ''} pending sync</div>` : ''}
       <div class="balance-header">
         <button class="balance-menu-btn" id="balance-menu-btn">
@@ -147,10 +149,9 @@ async function openEntry(type, existingTxn = null) {
   state.entryNote = existingTxn?.note ?? '';
   state.entryEditId = existingTxn?.id ?? null;
 
-  const cats = await db.categories
-    .where('isArchived').equals(0)
-    .filter(c => c.isIncome === (type === 'income'))
-    .sortBy('sortOrder');
+  const cats = (await db.categories.toArray())
+    .filter(c => !c.isArchived && (!!c.isIncome === (type === 'income')))
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -279,16 +280,25 @@ async function saveEntry(overlay) {
 }
 
 async function renderTransactions() {
+  const monthKey = state.txnMonth ?? today().slice(0, 7);
+  const [yyyy, mm] = monthKey.split('-').map(Number);
+  const monthStart = `${yyyy}-${String(mm).padStart(2, '0')}-01`;
+  const lastDay = new Date(yyyy, mm, 0).getDate();
+  const monthEnd = `${yyyy}-${String(mm).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  const monthLabel = new Date(yyyy, mm - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
   const query = state.txnSearchQuery.toLowerCase();
   let txns = await db.transactions
-    .where('type').anyOf(['expense', 'income', 'distributed_expense', 'distributed_income'])
-    .reverse().sortBy('date');
+    .where('date').between(monthStart, monthEnd, true, true)
+    .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
+    .toArray();
 
   txns.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
   if (query) txns = txns.filter(t => t.note?.toLowerCase().includes(query));
 
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
+  const monthTotal = txns.reduce((s, t) => s + t.amount, 0);
 
   const groups = {};
   for (const t of txns) {
@@ -308,13 +318,20 @@ async function renderTransactions() {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
       </div>
+      <button id="month-picker-btn" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--card);border:none;border-bottom:1px solid var(--border);width:100%;cursor:pointer;font-size:15px;color:var(--text)">
+        <span style="font-weight:500">${monthLabel}</span>
+        <span style="display:flex;align-items:center;gap:6px;color:var(--text-2);font-size:13px">
+          ${txns.length > 0 ? `<span style="color:${monthTotal >= 0 ? 'var(--green)' : 'var(--red)'}">${monthTotal >= 0 ? '+' : ''}${fmt(monthTotal)}</span>` : ''}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </span>
+      </button>
       <div class="search-bar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" id="txn-search" placeholder="Search transactions..." value="${state.txnSearchQuery}" style="flex:1;border:none;outline:none;font-size:15px;background:none">
       </div>
       <div id="txn-list-body">
         ${dates.length === 0 ? `
-          <div class="empty-state"><div class="empty-icon">📋</div><div class="empty-title">No transactions yet</div><div class="empty-text">Tap + to add your first transaction</div></div>
+          <div class="empty-state"><div class="empty-icon">📋</div><div class="empty-title">No transactions in ${monthLabel}</div><div class="empty-text">Tap + to add a transaction</div></div>
         ` : dates.map(date => {
           const dayTxns = groups[date];
           const dayTotal = dayTxns.reduce((s, t) => s + t.amount, 0);
@@ -352,8 +369,56 @@ async function renderTransactions() {
 
   viewContainer.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
   viewContainer.querySelector('#txn-search').oninput = e => { state.txnSearchQuery = e.target.value; renderTransactions(); };
+  viewContainer.querySelector('#month-picker-btn').onclick = () => showMonthPicker();
   delegate(viewContainer, 'click', '.txn-row', (e, el) => showTxnMenu(Number(el.dataset.txnId)));
   delegate(viewContainer, 'click', '.day-add-btn', (e, el) => { state.entryDate = el.dataset.date; openEntry('expense'); });
+}
+
+async function showMonthPicker() {
+  const allTxns = await db.transactions
+    .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
+    .toArray();
+  const monthTotals = {};
+  for (const t of allTxns) {
+    const mk = t.date.slice(0, 7);
+    if (!monthTotals[mk]) monthTotals[mk] = 0;
+    monthTotals[mk] += t.amount;
+  }
+  const months = Object.keys(monthTotals).sort((a, b) => b.localeCompare(a));
+  const currentKey = state.txnMonth ?? today().slice(0, 7);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:80vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Select Month</span>
+        <button class="sheet-close" id="month-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:0;overflow-y:auto">
+        ${months.map(mk => {
+          const [y, m] = mk.split('-').map(Number);
+          const label = new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+          const total = monthTotals[mk];
+          const isSel = mk === currentKey;
+          return `<div class="settings-row month-pick-row" data-month="${mk}" style="${isSel ? 'color:var(--blue)' : ''}">
+            <span style="flex:1;font-size:15px">${label}</span>
+            <span style="font-size:13px;color:${total >= 0 ? 'var(--green)' : 'var(--red)'}">Duration: ${new Date(y, m, 0).getDate()} days, ${fmt(total)}</span>
+            ${isSel ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" style="margin-left:8px"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#month-close').onclick = () => overlay.remove();
+  delegate(overlay, 'click', '.month-pick-row', (e, el) => {
+    state.txnMonth = el.dataset.month;
+    overlay.remove();
+    renderTransactions();
+  });
 }
 
 async function showTxnMenu(id) {
@@ -485,15 +550,20 @@ async function renderRecurring() {
     return `${fmt(r.amount)} (${freq}) ${start} - ${end}`;
   };
 
+  const heroColor = tab === 'income' ? 'linear-gradient(160deg,#2b82e8 0%,#4db8f7 100%)' : 'linear-gradient(160deg,var(--coral) 0%,var(--coral-light) 100%)';
+  const tabBg = tab === 'income' ? '#2b82e8' : 'var(--coral)';
   viewContainer.innerHTML = `
     <div class="recurring-screen">
-      <div class="recurring-hero">
+      <div class="recurring-hero" style="background:${heroColor};position:relative">
+        <button class="icon-btn" onclick="window.app.navigate('settings')" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
         <div class="recurring-hero-icon">${tab === 'expenses' ? '🏠' : '💵'}</div>
         <div class="recurring-hero-total">Total</div>
         <div class="recurring-hero-amount">${fmt(totalDaily)}<span style="font-size:16px;opacity:0.7"> /day</span></div>
         <div style="font-size:13px;opacity:0.8">${fmt(totalMonthly)}/month</div>
       </div>
-      <div class="tab-bar" style="background:var(--coral);border-bottom:none;padding:0 12px 12px">
+      <div class="tab-bar" style="background:${tabBg};border-bottom:none;padding:0 12px 12px">
         <button class="chip ${tab === 'expenses' ? 'active' : ''}" id="tab-exp"
                 style="${tab === 'expenses' ? 'background:rgba(255,255,255,0.3);border-color:rgba(255,255,255,0.6);color:white' : 'background:rgba(0,0,0,0.1);border-color:rgba(255,255,255,0.3);color:rgba(255,255,255,0.8)'}">
           Expenses
@@ -662,59 +732,90 @@ async function renderAnalysis() {
   });
 }
 
+function makeDistCard(d, catMap) {
+  const cat = catMap[d.categoryId];
+  const progress = Math.min(100, Math.max(0, diffDays(d.startDate, today()) / Math.max(1, diffDays(d.startDate, d.endDate)) * 100));
+  return `
+    <div class="dist-card" data-dist-id="${d.id}">
+      <div class="dist-card-header"><span class="dist-card-name">${d.description}</span><span class="dist-card-amount">${fmt(Math.abs(d.totalAmount))}</span></div>
+      <div class="dist-card-meta">${cat?.icon ?? ''} ${cat?.name ?? ''} &bull; ${fmtDate(d.startDate)} - ${fmtDate(d.endDate)}</div>
+      ${!d.isFinished ? `<div class="dist-progress-wrap"><div class="dist-progress-fill" style="width:${progress}%"></div></div>` : ''}
+    </div>
+  `;
+}
+
 async function renderDistributions() {
-  const dists = await db.distributions.toArray();
+  const allDists = await db.distributions.toArray();
+  const dists = allDists.filter(d => !d.isIncome);
   const active = dists.filter(d => !d.isFinished).sort((a, b) => a.startDate.localeCompare(b.startDate));
   const finished = dists.filter(d => d.isFinished).sort((a, b) => b.endDate.localeCompare(a.endDate));
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
 
-  const renderDist = d => {
-    const cat = catMap[d.categoryId];
-    const progress = Math.min(100, Math.max(0, diffDays(d.startDate, today()) / Math.max(1, diffDays(d.startDate, d.endDate)) * 100));
-    return `
-      <div class="dist-card" data-dist-id="${d.id}">
-        <div class="dist-card-header"><span class="dist-card-name">${d.description}</span><span class="dist-card-amount">${fmt(Math.abs(d.totalAmount))}</span></div>
-        <div class="dist-card-meta">${cat?.icon ?? ''} ${cat?.name ?? ''} &bull; ${fmtDate(d.startDate)} - ${fmtDate(d.endDate)}</div>
-        ${!d.isFinished ? `<div class="dist-progress-wrap"><div class="dist-progress-fill" style="width:${progress}%"></div></div>` : ''}
-      </div>
-    `;
-  };
-
   viewContainer.innerHTML = `
     <div class="distributions-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('balance')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="screen-title">Big Expenses</span>
         <button class="icon-btn" id="dist-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
-      ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(renderDist).join('')}` : ''}
-      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.slice(0, 20).map(renderDist).join('')}` : ''}
+      ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
+      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.slice(0, 20).map(d => makeDistCard(d, catMap)).join('')}` : ''}
       ${dists.length === 0 ? `<div class="empty-state"><div class="empty-icon">📅</div><div class="empty-title">No big expenses</div><div class="empty-text">Spread large costs across a date range so they don't distort your daily balance.</div><button class="btn btn-primary" id="dist-empty-add">Add big expense</button></div>` : ''}
     </div>
   `;
 
-  viewContainer.querySelector('#dist-add-btn')?.addEventListener('click', () => openDistEditor(null));
-  viewContainer.querySelector('#dist-empty-add')?.addEventListener('click', () => openDistEditor(null));
-  delegate(viewContainer, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId)));
+  viewContainer.querySelector('#dist-add-btn')?.addEventListener('click', () => openDistEditor(null, false));
+  viewContainer.querySelector('#dist-empty-add')?.addEventListener('click', () => openDistEditor(null, false));
+  delegate(viewContainer, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), false));
 }
 
-async function openDistEditor(id) {
-  const cats = await db.categories.where('isArchived').equals(0).sortBy('sortOrder');
+async function renderExtraIncomes() {
+  const allDists = await db.distributions.toArray();
+  const dists = allDists.filter(d => d.isIncome);
+  const active = dists.filter(d => !d.isFinished).sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const finished = dists.filter(d => d.isFinished).sort((a, b) => b.endDate.localeCompare(a.endDate));
+  const cats = await db.categories.toArray();
+  const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
+
+  viewContainer.innerHTML = `
+    <div class="distributions-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <span class="screen-title">Extra Incomes</span>
+        <button class="icon-btn" id="extra-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+      </div>
+      ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
+      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.slice(0, 20).map(d => makeDistCard(d, catMap)).join('')}` : ''}
+      ${dists.length === 0 ? `<div class="empty-state"><div class="empty-icon">💰</div><div class="empty-title">No extra incomes</div><div class="empty-text">Record lump-sum income spread across a date range, like a bonus or freelance payment.</div><button class="btn btn-primary" id="extra-empty-add">Add extra income</button></div>` : ''}
+    </div>
+  `;
+
+  viewContainer.querySelector('#extra-add-btn')?.addEventListener('click', () => openDistEditor(null, true));
+  viewContainer.querySelector('#extra-empty-add')?.addEventListener('click', () => openDistEditor(null, true));
+  delegate(viewContainer, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), true));
+}
+
+async function openDistEditor(id, isIncomeType = false) {
   const dist = id ? await db.distributions.get(id) : null;
+  const isIncomeDist = dist ? !!dist.isIncome : isIncomeType;
+  const allCats = await db.categories.toArray();
+  const cats = allCats.filter(c => !c.isArchived && (!!c.isIncome === isIncomeDist)).sort((a, b) => a.sortOrder - b.sortOrder);
+  const title = isIncomeDist ? (dist ? 'Edit Extra Income' : 'Add Extra Income') : (dist ? 'Edit Big Expense' : 'Add Big Expense');
+  const goBack = () => isIncomeDist ? renderExtraIncomes() : renderDistributions();
+
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
   overlay.innerHTML = `
     <div class="sheet">
       <div class="sheet-handle"></div>
-      <div class="sheet-header"><span class="sheet-title">${dist ? 'Edit' : 'Add'} Big Expense</span><button class="sheet-close" id="dist-close">✕</button></div>
+      <div class="sheet-header"><span class="sheet-title">${title}</span><button class="sheet-close" id="dist-close">✕</button></div>
       <div class="sheet-body" style="padding:16px">
-        <div class="form-group"><label class="form-label">Description</label><input class="form-input" id="dist-desc" type="text" value="${dist?.description ?? ''}" placeholder="e.g. Holiday flights"></div>
+        <div class="form-group"><label class="form-label">Description</label><input class="form-input" id="dist-desc" type="text" value="${dist?.description ?? ''}" placeholder="${isIncomeDist ? 'e.g. Bonus payment' : 'e.g. Holiday flights'}"></div>
         <div class="form-group"><label class="form-label">Total amount (£)</label><input class="form-input" id="dist-amount" type="number" step="0.01" min="0" value="${dist ? Math.abs(dist.totalAmount) : ''}"></div>
         <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="dist-cat">${cats.map(c => `<option value="${c.id}" ${dist?.categoryId === c.id ? 'selected' : ''}>${c.icon} ${c.name}</option>`).join('')}</select></div>
         <div class="form-group"><label class="form-label">Spread from</label><input class="form-input" id="dist-start" type="date" value="${dist?.startDate ?? today()}"></div>
         <div class="form-group"><label class="form-label">Spread to</label><input class="form-input" id="dist-end" type="date" value="${dist?.endDate ?? today()}"></div>
-        <div class="form-group" style="display:flex;align-items:center;gap:12px"><label class="form-label" style="margin:0">This is income</label><label class="toggle"><input type="checkbox" id="dist-income" ${dist?.isIncome ? 'checked' : ''}><span class="toggle-slider"></span></label></div>
         <div style="display:flex;gap:8px;padding-bottom:20px;margin-top:8px">
           ${dist ? `<button class="btn btn-danger" id="dist-del">Delete</button>` : ''}
           <button class="btn btn-primary" id="dist-save" style="flex:1">${dist ? 'Update' : 'Save'}</button>
@@ -733,7 +834,7 @@ async function openDistEditor(id) {
       await db.distributions.delete(id);
       await Promise.all(childIds.map(cid => queueDelete('transactions', cid)));
       await queueDelete('distributions', id);
-      overlay.remove(); renderDistributions(); showToast('Deleted');
+      overlay.remove(); goBack(); showToast('Deleted');
     };
   }
   overlay.querySelector('#dist-save').onclick = async () => {
@@ -742,7 +843,6 @@ async function openDistEditor(id) {
     const categoryId = Number(overlay.querySelector('#dist-cat').value);
     const startDate = overlay.querySelector('#dist-start').value;
     const endDate = overlay.querySelector('#dist-end').value;
-    const isIncome = overlay.querySelector('#dist-income').checked;
     if (!description || isNaN(totalAmount) || !startDate || !endDate) { showToast('Fill in all fields'); return; }
     if (endDate < startDate) { showToast('End date must be after start date'); return; }
     if (id) {
@@ -750,7 +850,7 @@ async function openDistEditor(id) {
       await db.transactions.where('distributionId').equals(id).delete();
       await Promise.all(oldChildIds.map(cid => queueDelete('transactions', cid)));
     }
-    const distData = { description, totalAmount, categoryId, startDate, endDate, isIncome, isFinished: endDate < today() };
+    const distData = { description, totalAmount, categoryId, startDate, endDate, isIncome: isIncomeDist, isFinished: endDate < today() };
     let distId;
     if (id) { await db.distributions.update(id, distData); distId = id; }
     else { distId = await db.distributions.add(distData); }
@@ -759,7 +859,7 @@ async function openDistEditor(id) {
     await db.transactions.bulkAdd(children);
     const newChildren = await db.transactions.where('distributionId').equals(distId).toArray();
     await Promise.all(newChildren.map(c => queueWrite('transactions', c.id)));
-    overlay.remove(); renderDistributions(); showToast(id ? 'Updated' : `Created ${children.length} daily entries`);
+    overlay.remove(); goBack(); showToast(id ? 'Updated' : `Created ${children.length} daily entries`);
   };
 }
 
@@ -844,7 +944,6 @@ async function openSnapshotEntry(accounts, latest) {
 
 async function renderSettings() {
   const savings = await getSetting('savingsAmount') ?? 1500;
-  const cycleStart = await getSetting('cycleStartDay') ?? 1;
   const user = state.currentUser;
   const ss = syncState;
   const lastSync = await getSetting('lastSyncAt');
@@ -887,18 +986,23 @@ async function renderSettings() {
     <div class="settings-screen">
       <div class="screen-header" style="padding-top:52px"><div style="width:34px"></div><span class="screen-title">Settings</span><div style="width:34px"></div></div>
       <div class="settings-section">
-        <div class="settings-section-title">Budget</div>
+        <div class="settings-section-title">Income</div>
         <div class="settings-card">
-          <div class="settings-row"><span class="settings-row-icon">💰</span><span class="settings-row-label">Monthly savings target</span><span style="color:var(--text-2);font-size:14px">£</span><input type="number" id="setting-savings" value="${savings}" step="50" min="0" style="border:none;outline:none;font-size:15px;text-align:right;width:80px;background:none"></div>
-          <div class="settings-row"><span class="settings-row-icon">📅</span><span class="settings-row-label">Cycle starts on day</span><input type="number" id="setting-cycle" value="${cycleStart}" min="1" max="28" style="border:none;outline:none;font-size:15px;text-align:right;width:50px;background:none"></div>
+          <div class="settings-row" id="nav-rec-income"><span class="settings-row-icon">💵</span><span class="settings-row-label">Recurring income</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-extra-incomes"><span class="settings-row-icon">💰</span><span class="settings-row-label">Extra incomes</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-section-title">Manage</div>
+        <div class="settings-section-title">Costs</div>
         <div class="settings-card">
           <div class="settings-row" id="nav-recurring"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Recurring expenses</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big Expenses</span><span class="settings-row-chevron">›</span></div>
-          <div class="settings-row" id="nav-accounts"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Account snapshots</span><span class="settings-row-chevron">›</span></div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Savings</div>
+        <div class="settings-card">
+          <div class="settings-row"><span class="settings-row-icon">💛</span><span class="settings-row-label">Monthly savings target</span><span style="color:var(--text-2);font-size:14px">£</span><input type="number" id="setting-savings" value="${savings}" step="50" min="0" style="border:none;outline:none;font-size:15px;text-align:right;width:80px;background:none"></div>
         </div>
       </div>
       <div class="settings-section">
@@ -914,10 +1018,10 @@ async function renderSettings() {
     </div>
   `;
   viewContainer.querySelector('#setting-savings').onchange = async e => { await setSetting('savingsAmount', Number(e.target.value)); await queueWrite('settings', 'savingsAmount'); showToast('Savings target updated'); };
-  viewContainer.querySelector('#setting-cycle').onchange = async e => { await setSetting('cycleStartDay', Number(e.target.value)); await queueWrite('settings', 'cycleStartDay'); showToast('Cycle start day updated'); };
-  viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring');
+  viewContainer.querySelector('#nav-rec-income').onclick = () => navigate('recurring', { recurringTab: 'income' });
+  viewContainer.querySelector('#nav-extra-incomes').onclick = () => navigate('extraIncomes');
+  viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
-  viewContainer.querySelector('#nav-accounts').onclick = () => navigate('accounts');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
   viewContainer.querySelector('#clear-btn').onclick = async () => {
