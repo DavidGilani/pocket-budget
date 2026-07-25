@@ -58,7 +58,7 @@ export async function calcDailyAllowance(cycleStart, cycleEnd) {
     .reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
 
   const dailyAllowance = monthlyIncome / cycleLen - dailyExpenses - monthlySavings / cycleLen;
-  return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen };
+  return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen, dailyExpenses };
 }
 
 export async function getVariableTransactions(fromDate, toDate) {
@@ -138,7 +138,7 @@ export function generateDistributionChildren(dist) {
 }
 
 export async function getCycleBreakdown(cycleStart, cycleEnd) {
-  const { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings } = await calcDailyAllowance(cycleStart, cycleEnd);
+  const { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, cycleLen, dailyExpenses } = await calcDailyAllowance(cycleStart, cycleEnd);
 
   const txns = await getVariableTransactions(cycleStart, cycleEnd);
   let variableExpenses = 0;
@@ -150,11 +150,10 @@ export async function getCycleBreakdown(cycleStart, cycleEnd) {
     else if (t.type === 'income' || t.type === 'distributed_income') variableIncome += t.amount;
   }
 
-  const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
-  const totalRecurringExpenses = monthlyExpenses;
+  // Use dailyExpenses*cycleLen so this matches calcRollingBalance (e.g. yearly uses amount/365*cycleLen)
+  const totalRecurringExpenses = dailyExpenses * cycleLen;
   const totalIncome = monthlyIncome + variableIncome;
   const totalExpenses = totalRecurringExpenses + variableExpenses + distributionExpenses;
-  const budgetSpent = totalRecurringExpenses + monthlySavings;
   const budgetLeft = totalIncome - totalExpenses - monthlySavings;
 
   return {

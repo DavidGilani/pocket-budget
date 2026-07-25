@@ -23,10 +23,23 @@ const state = {
   pendingSync: 0,
   currentUser: null,
   txnMonth: null,
+  prevBalance: null,
 };
 
 const viewContainer = document.getElementById('view');
 const navBtns = document.querySelectorAll('.nav-btn');
+
+function animateCounter(el, from, to, duration = 420) {
+  const start = performance.now();
+  const step = ts => {
+    const t = Math.min((ts - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - t, 3);
+    el.textContent = fmt(from + (to - from) * ease);
+    if (t < 1) requestAnimationFrame(step);
+    else el.textContent = fmt(to);
+  };
+  requestAnimationFrame(step);
+}
 
 function navigate(view, params = {}) {
   Object.assign(state, params);
@@ -114,10 +127,12 @@ async function renderBalance() {
       </div>
 
       <div class="balance-projection">
-        ${projections.map((p, i) => `
+        ${projections.map((p, i) => {
+          const targetH = Math.max(20, Math.round(Math.abs(p.balance) / maxBal * 80));
+          return `
           <div class="proj-day">
             <div class="proj-bar-wrap">
-              <div class="proj-bar" style="height:${Math.max(20, Math.round(Math.abs(p.balance) / maxBal * 80))}px">
+              <div class="proj-bar" style="height:4px" data-target-h="${targetH}">
                 ${segments(p.balance)}
               </div>
             </div>
@@ -125,7 +140,7 @@ async function renderBalance() {
             <div class="proj-label">${dayLabels[i]}</div>
             <div class="proj-amount">${fmt(p.balance)}</div>
           </div>
-        `).join('')}
+        `}).join('')}
       </div>
 
       <div class="balance-fabs">
@@ -134,6 +149,21 @@ async function renderBalance() {
       </div>
     </div>
   `;
+
+  // Animate balance counter if it changed
+  const prevBal = state.prevBalance;
+  state.prevBalance = todayBal;
+  if (prevBal !== null && Math.abs(prevBal - todayBal) > 0.005) {
+    animateCounter(viewContainer.querySelector('.balance-amount'), prevBal, todayBal, 420);
+  }
+
+  // Animate projection bars (always — gives a nice entrance on every load)
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    viewContainer.querySelectorAll('.proj-bar').forEach(bar => {
+      bar.style.transition = 'height 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)';
+      bar.style.height = bar.dataset.targetH + 'px';
+    });
+  }));
 
   viewContainer.querySelector('#fab-income').onclick = () => openEntry('income');
   viewContainer.querySelector('#fab-expense').onclick = () => openEntry('expense');
@@ -584,14 +614,19 @@ async function showMonthPicker() {
   const allTxns = await db.transactions
     .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
     .toArray();
-  const monthTotals = {};
-  for (const t of allTxns) {
-    const mk = t.date.slice(0, 7);
-    if (!monthTotals[mk]) monthTotals[mk] = 0;
-    monthTotals[mk] += t.amount;
-  }
-  const months = Object.keys(monthTotals).sort((a, b) => b.localeCompare(a));
+  const monthSet = new Set(allTxns.map(t => t.date.slice(0, 7)));
+  const months = [...monthSet].sort((a, b) => b.localeCompare(a));
   const currentKey = state.txnMonth ?? today().slice(0, 7);
+  const todayStr = today();
+
+  // Compute rolling balance (budget left) for each month — the single source of truth
+  const balances = await Promise.all(months.map(async mk => {
+    const [y, m] = mk.split('-').map(Number);
+    const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`;
+    const effectiveDate = todayStr < monthEnd ? todayStr : monthEnd;
+    const { balance } = await calcRollingBalance(effectiveDate);
+    return balance;
+  }));
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -603,14 +638,14 @@ async function showMonthPicker() {
         <button class="sheet-close" id="month-close">✕</button>
       </div>
       <div class="sheet-body" style="padding:0;overflow-y:auto">
-        ${months.map(mk => {
+        ${months.map((mk, idx) => {
           const [y, m] = mk.split('-').map(Number);
           const label = new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-          const total = monthTotals[mk];
+          const bal = balances[idx];
           const isSel = mk === currentKey;
           return `<div class="settings-row month-pick-row" data-month="${mk}" style="${isSel ? 'color:var(--blue)' : ''}">
             <span style="flex:1;font-size:15px">${label}</span>
-            <span style="font-size:13px;color:${total >= 0 ? 'var(--green)' : 'var(--red)'}">Duration: ${new Date(y, m, 0).getDate()} days, ${fmt(total)}</span>
+            <span style="font-size:13px;color:${bal >= 0 ? 'var(--green)' : 'var(--red)'}">${new Date(y, m, 0).getDate()} days · Budget left: ${fmt(bal)}</span>
             ${isSel ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" style="margin-left:8px"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
           </div>`;
         }).join('')}
