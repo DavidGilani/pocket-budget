@@ -287,6 +287,8 @@ async function renderTransactions() {
   const monthEnd = `${yyyy}-${String(mm).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
   const monthLabel = new Date(yyyy, mm - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
+  const { dailyAllowance } = await calcDailyAllowance(monthStart, monthEnd);
+
   const query = state.txnSearchQuery.toLowerCase();
   let txns = await db.transactions
     .where('date').between(monthStart, monthEnd, true, true)
@@ -306,6 +308,17 @@ async function renderTransactions() {
     groups[t.date].push(t);
   }
   const dates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+
+  const budgetRow = `
+    <div class="txn-row txn-row-budget">
+      <div class="txn-cat-icon" style="background:#2b82e820">💵</div>
+      <div class="txn-info">
+        <div class="txn-note">Daily Budget</div>
+        <div class="txn-cat-name">Allowance</div>
+      </div>
+      <div class="txn-amount positive">+${fmt(dailyAllowance)}</div>
+    </div>
+  `;
 
   viewContainer.innerHTML = `
     <div class="transactions-screen">
@@ -334,7 +347,7 @@ async function renderTransactions() {
           <div class="empty-state"><div class="empty-icon">📋</div><div class="empty-title">No transactions in ${monthLabel}</div><div class="empty-text">Tap + to add a transaction</div></div>
         ` : dates.map(date => {
           const dayTxns = groups[date];
-          const dayTotal = dayTxns.reduce((s, t) => s + t.amount, 0);
+          const dayTotal = dayTxns.reduce((s, t) => s + t.amount, dailyAllowance);
           const d = new Date(date + 'T12:00:00');
           const dayLabel = d.toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
           return `
@@ -344,6 +357,7 @@ async function renderTransactions() {
                 <button class="day-add-btn" data-date="${date}">+</button>
               </div>
               <div class="txn-list">
+                ${budgetRow}
                 ${dayTxns.map(t => {
                   const cat = catMap[t.categoryId];
                   const sign = t.amount >= 0 ? '+' : '';
@@ -540,6 +554,8 @@ async function renderRecurring() {
       .toArray();
   }
 
+  items.sort((a, b) => monthlyEquivalent(b.amount ?? 0, b.frequency ?? 'monthly') - monthlyEquivalent(a.amount ?? 0, a.frequency ?? 'monthly'));
+
   const totalMonthly = items.reduce((s, r) => s + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
   const totalDaily = totalMonthly * 12 / 365;
 
@@ -574,20 +590,20 @@ async function renderRecurring() {
         </button>
       </div>
       <div class="recurring-list">
+        <button class="btn btn-primary btn-full" id="rec-add-btn" style="margin-bottom:8px">+ Add ${tab === 'expenses' ? 'expense' : 'income'}</button>
         ${items.length === 0 ? `
-          <div class="empty-state"><div class="empty-icon">${tab === 'expenses' ? '💸' : '💰'}</div><div class="empty-title">No active ${tab}</div><div class="empty-text">Tap + to add one</div></div>
+          <div class="empty-state" style="padding-top:8px"><div class="empty-icon">${tab === 'expenses' ? '💸' : '💰'}</div><div class="empty-title">No active ${tab}</div><div class="empty-text">Tap + above to add one</div></div>
         ` : items.map(r => `
           <div class="recurring-card" data-rec-id="${r.id}" data-rec-type="${tab}">
             <div class="recurring-card-info">
               <div class="recurring-card-name">${r.description}</div>
-              <div class="recurring-card-meta">${formatMeta(r)}${r.isShared ? ' - Shared' : ''}</div>
+              <div class="recurring-card-meta">${formatMeta(r)}</div>
             </div>
             <div class="recurring-card-amount">
               <div class="recurring-card-daily">${fmt(dailyEquivalent(r.amount, r.frequency ?? 'monthly'))}<span style="font-size:14px;font-weight:400"> /day</span></div>
             </div>
           </div>
         `).join('')}
-        <button class="btn btn-primary btn-full" id="rec-add-btn" style="margin-top:8px">+ Add ${tab === 'expenses' ? 'expense' : 'income'}</button>
       </div>
     </div>
   `;
@@ -613,12 +629,7 @@ async function openRecurringEditor(id, type) {
       <div class="sheet-body" style="padding:16px">
         <div class="form-group"><label class="form-label">Description</label><input class="form-input" id="rec-desc" type="text" value="${item?.description ?? ''}" placeholder="e.g. Netflix"></div>
         <div class="form-group"><label class="form-label">Amount (£)</label><input class="form-input" id="rec-amount" type="number" step="0.01" min="0" value="${item?.amount ?? ''}" placeholder="0.00"></div>
-        ${isExpense ? `
-          <div class="form-group"><label class="form-label">Frequency</label><select class="form-select" id="rec-freq"><option value="monthly" ${item?.frequency === 'monthly' ? 'selected' : ''}>Monthly</option><option value="yearly" ${item?.frequency === 'yearly' ? 'selected' : ''}>Yearly</option><option value="quarterly" ${item?.frequency === 'quarterly' ? 'selected' : ''}>Quarterly</option></select></div>
-          <div class="form-group" style="display:flex;align-items:center;gap:12px"><label class="form-label" style="margin:0">Shared with Rich</label><label class="toggle"><input type="checkbox" id="rec-shared" ${item?.isShared ? 'checked' : ''}><span class="toggle-slider"></span></label></div>
-        ` : `
-          <div class="form-group"><label class="form-label">Interval (days)</label><input class="form-input" id="rec-interval" type="number" value="${item?.intervalDays ?? 30}" min="1"></div>
-        `}
+        <div class="form-group"><label class="form-label">Frequency</label><select class="form-select" id="rec-freq"><option value="monthly" ${(item?.frequency ?? 'monthly') === 'monthly' ? 'selected' : ''}>Monthly</option><option value="yearly" ${item?.frequency === 'yearly' ? 'selected' : ''}>Yearly</option><option value="quarterly" ${item?.frequency === 'quarterly' ? 'selected' : ''}>Quarterly</option></select></div>
         <div class="form-group"><label class="form-label">Start date</label><input class="form-input" id="rec-start" type="date" value="${item?.startDate ?? today()}"></div>
         <div class="form-group"><label class="form-label">End date (leave blank for open-ended)</label><input class="form-input" id="rec-end" type="date" value="${(!item?.endDate || item.endDate === '4001-01-01') ? '' : item.endDate}"></div>
         <div style="display:flex;gap:8px;padding-bottom:20px">
@@ -645,15 +656,14 @@ async function openRecurringEditor(id, type) {
     const start = overlay.querySelector('#rec-start').value;
     const end = overlay.querySelector('#rec-end').value || '4001-01-01';
     if (!desc || isNaN(amount)) { showToast('Fill in description and amount'); return; }
+    const freq = overlay.querySelector('#rec-freq').value;
     if (isExpense) {
-      const freq = overlay.querySelector('#rec-freq').value;
-      const shared = overlay.querySelector('#rec-shared').checked;
+      const shared = item?.isShared ?? false;
       const data = { description: desc, amount, frequency: freq, isShared: shared, sharePercent: 50, startDate: start, endDate: end, isActive: true };
       if (id) { await db.recurringExpenses.update(id, data); await queueWrite('recurringExpenses', id); }
       else { const newId = await db.recurringExpenses.add(data); await queueWrite('recurringExpenses', newId); }
     } else {
-      const interval = parseInt(overlay.querySelector('#rec-interval').value) || 30;
-      const data = { description: desc, amount, intervalDays: interval, startDate: start, endDate: end, isActive: true };
+      const data = { description: desc, amount, frequency: freq, startDate: start, endDate: end, isActive: true };
       if (id) { await db.recurringIncome.update(id, data); await queueWrite('recurringIncome', id); }
       else { const newId = await db.recurringIncome.add(data); await queueWrite('recurringIncome', newId); }
     }
@@ -942,6 +952,65 @@ async function openSnapshotEntry(accounts, latest) {
   };
 }
 
+async function openSavingsSheet() {
+  const [savings, cycle] = await Promise.all([getSetting('savingsAmount') ?? 1500, getCurrentCycle()]);
+  const { monthlyIncome, monthlyExpenses } = await calcDailyAllowance(cycle.start, cycle.end);
+  const takeHome = monthlyIncome - monthlyExpenses;
+
+  const pctIncome = monthlyIncome > 0 ? ((savings / monthlyIncome) * 100).toFixed(1) : 0;
+  const pctTakeHome = takeHome > 0 ? ((savings / takeHome) * 100).toFixed(1) : 0;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">Monthly Savings Target</span><button class="sheet-close" id="sav-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Target amount (£)</label>
+          <input class="form-input" id="sav-amount" type="number" step="50" min="0" value="${savings}" placeholder="0">
+        </div>
+        <div id="sav-stats" style="background:var(--bg);border-radius:var(--radius-sm);padding:14px;margin-top:4px;font-size:13px;line-height:2;color:var(--text-2)">
+          <div style="display:flex;justify-content:space-between"><span>% of monthly income</span><span style="color:var(--text);font-weight:600">${pctIncome}%</span></div>
+          <div style="display:flex;justify-content:space-between"><span>% of take-home (after expenses)</span><span style="color:var(--text);font-weight:600">${pctTakeHome}%</span></div>
+          <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
+          <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
+          <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
+        </div>
+        <button class="btn btn-primary btn-full" id="sav-save" style="margin-top:16px;margin-bottom:20px">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#sav-close').onclick = () => overlay.remove();
+
+  const amtInput = overlay.querySelector('#sav-amount');
+  const statsDiv = overlay.querySelector('#sav-stats');
+  amtInput.oninput = () => {
+    const v = parseFloat(amtInput.value) || 0;
+    const pi = monthlyIncome > 0 ? ((v / monthlyIncome) * 100).toFixed(1) : 0;
+    const pt = takeHome > 0 ? ((v / takeHome) * 100).toFixed(1) : 0;
+    statsDiv.innerHTML = `
+      <div style="display:flex;justify-content:space-between"><span>% of monthly income</span><span style="color:var(--text);font-weight:600">${pi}%</span></div>
+      <div style="display:flex;justify-content:space-between"><span>% of take-home (after expenses)</span><span style="color:var(--text);font-weight:600">${pt}%</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Take-home</span><span>${fmt(takeHome)}</span></div>
+    `;
+  };
+  overlay.querySelector('#sav-save').onclick = async () => {
+    const v = parseFloat(amtInput.value);
+    if (isNaN(v) || v < 0) { showToast('Enter a valid amount'); return; }
+    await setSetting('savingsAmount', v);
+    try { await queueWrite('settings', 'savingsAmount'); } catch {}
+    overlay.remove();
+    showToast('Savings target updated');
+    if (state.view === 'settings') renderSettings();
+  };
+}
+
 async function renderSettings() {
   const savings = await getSetting('savingsAmount') ?? 1500;
   const user = state.currentUser;
@@ -1002,7 +1071,7 @@ async function renderSettings() {
       <div class="settings-section">
         <div class="settings-section-title">Savings</div>
         <div class="settings-card">
-          <div class="settings-row"><span class="settings-row-icon">💛</span><span class="settings-row-label">Monthly savings target</span><span style="color:var(--text-2);font-size:14px">£</span><input type="number" id="setting-savings" value="${savings}" step="50" min="0" style="border:none;outline:none;font-size:15px;text-align:right;width:80px;background:none"></div>
+          <div class="settings-row" id="savings-target-row" style="cursor:pointer"><span class="settings-row-icon">💛</span><span class="settings-row-label">Monthly savings target</span><span style="color:var(--text-2);font-size:14px;margin-left:auto">${fmt(savings)}</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -1017,7 +1086,7 @@ async function renderSettings() {
       <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">Pocket Ledger - Personal Finance<br>Data stored locally on this device</div>
     </div>
   `;
-  viewContainer.querySelector('#setting-savings').onchange = async e => { await setSetting('savingsAmount', Number(e.target.value)); await queueWrite('settings', 'savingsAmount'); showToast('Savings target updated'); };
+  viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
   viewContainer.querySelector('#nav-rec-income').onclick = () => navigate('recurring', { recurringTab: 'income' });
   viewContainer.querySelector('#nav-extra-incomes').onclick = () => navigate('extraIncomes');
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
@@ -1141,8 +1210,41 @@ async function exportData() {
   showToast('Export downloaded');
 }
 
+async function runDataMigrations() {
+  const ver = (await getSetting('dataVersion')) ?? 0;
+  if (ver < 1) {
+    // Unarchive Investment category so it's selectable for extra incomes
+    await db.categories.update(21, { isArchived: false, sortOrder: 15 });
+
+    // Convert recurringIncome from intervalDays to frequency
+    const incomes = await db.recurringIncome.toArray();
+    for (const r of incomes) {
+      if (!r.frequency) {
+        let freq = 'monthly';
+        if (r.intervalDays >= 85 && r.intervalDays <= 100) freq = 'quarterly';
+        else if (r.intervalDays >= 300) freq = 'yearly';
+        await db.recurringIncome.update(r.id, { frequency: freq });
+      }
+    }
+
+    // Fix all imported distributions: extraction script set isIncome=true for all
+    // (amounts in ZWISH are always positive), but they are all expenses
+    const dists = await db.distributions.toArray();
+    const badDists = dists.filter(d => !!d.isIncome);
+    for (let i = 0; i < badDists.length; i += 50) {
+      await Promise.all(badDists.slice(i, i + 50).map(async d => {
+        await db.distributions.update(d.id, { isIncome: false });
+        try { await queueWrite('distributions', d.id); } catch {}
+      }));
+    }
+
+    await setSetting('dataVersion', 1);
+  }
+}
+
 async function init() {
   await initDB();
+  await runDataMigrations();
   await handleRedirectResult();
   navBtns.forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.view)));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
