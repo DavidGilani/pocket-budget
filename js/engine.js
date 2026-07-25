@@ -145,13 +145,13 @@ export async function getCycleBreakdown(cycleStart, cycleEnd) {
 
   const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
   const totalRecurringExpenses = monthlyExpenses * cycleLen / 30;
-  const totalIncome = monthlyIncome * cycleLen / 30 + variableIncome;
+  const totalIncome = monthlyIncome + variableIncome;
   const totalExpenses = totalRecurringExpenses + variableExpenses + distributionExpenses;
   const budgetSpent = totalRecurringExpenses + monthlySavings * cycleLen / 30;
   const budgetLeft = totalIncome - totalExpenses - monthlySavings * cycleLen / 30;
 
   return {
-    totalIncome, regularIncome: monthlyIncome * cycleLen / 30, variableIncome,
+    totalIncome, regularIncome: monthlyIncome, variableIncome,
     totalExpenses, recurringExpenses: totalRecurringExpenses, variableExpenses, distributionExpenses,
     savings: monthlySavings * cycleLen / 30,
     budgetLeft,
