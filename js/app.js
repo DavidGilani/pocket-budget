@@ -9,7 +9,7 @@ import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore
 const state = {
   view: 'balance',
   entryType: 'expense',
-  entryAmount: '',
+  entryPence: 0,
   entryCategory: null,
   entryDate: today(),
   entryNote: '',
@@ -143,7 +143,7 @@ async function renderBalance() {
 
 async function openEntry(type, existingTxn = null) {
   state.entryType = type;
-  state.entryAmount = existingTxn ? String(Math.abs(existingTxn.amount)) : '';
+  state.entryPence = existingTxn ? Math.round(Math.abs(existingTxn.amount) * 100) : 0;
   state.entryCategory = existingTxn?.categoryId ?? null;
   state.entryDate = existingTxn?.date ?? today();
   state.entryNote = existingTxn?.note ?? '';
@@ -152,6 +152,9 @@ async function openEntry(type, existingTxn = null) {
   const cats = (await db.categories.toArray())
     .filter(c => !c.isArchived && (!!c.isIncome === (type === 'income')))
     .sort((a, b) => a.sortOrder - b.sortOrder);
+
+  const selectedCat = cats.find(c => c.id === state.entryCategory);
+  const hasCategory = !!selectedCat;
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -165,14 +168,23 @@ async function openEntry(type, existingTxn = null) {
         <button class="sheet-close" id="entry-close">✕</button>
       </div>
       <div class="sheet-body">
-        <div class="entry-amount-display ${type} placeholder" id="entry-display">
-          ${state.entryAmount ? fmt(parseFloat(state.entryAmount)) : '£0.00'}
+        <div class="entry-amount-display ${type} ${state.entryPence === 0 ? 'placeholder' : ''}" id="entry-display">
+          ${state.entryPence > 0 ? fmt(state.entryPence / 100) : '£0.00'}
         </div>
 
-        <div class="cat-grid" id="cat-grid">
+        <div class="entry-field cat-collapsed-row" id="cat-collapsed" style="${hasCategory ? '' : 'display:none'}">
+          <span class="entry-field-icon">🏷️</span>
+          <label>Category</label>
+          <div id="cat-preview" style="flex:1;font-size:15px;color:var(--text)">
+            ${hasCategory ? `<span style="margin-right:4px">${selectedCat.icon}</span>${selectedCat.name}` : ''}
+          </div>
+          <span style="color:var(--text-2);font-size:18px">›</span>
+        </div>
+
+        <div class="cat-grid" id="cat-grid" style="${hasCategory ? 'display:none' : ''}">
           ${cats.map(c => `
             <div class="cat-item ${state.entryCategory === c.id ? 'selected' : ''}"
-                 data-cat="${c.id}" data-cat-name="${c.name}">
+                 data-cat="${c.id}" data-cat-name="${c.name}" data-cat-icon="${c.icon}">
               <div class="cat-icon" style="background:${c.colour}20; color:${c.colour}">
                 ${c.icon}
               </div>
@@ -210,22 +222,29 @@ async function openEntry(type, existingTxn = null) {
   overlay.addEventListener('click', e => { if (e.target === overlay) closeEntry(); });
   overlay.querySelector('#entry-close').onclick = closeEntry;
 
+  overlay.querySelector('#cat-collapsed').onclick = () => {
+    overlay.querySelector('#cat-collapsed').style.display = 'none';
+    overlay.querySelector('#cat-grid').style.display = '';
+  };
+
   delegate(overlay, 'click', '.cat-item', (e, el) => {
     overlay.querySelectorAll('.cat-item').forEach(i => i.classList.remove('selected'));
     el.classList.add('selected');
     state.entryCategory = Number(el.dataset.cat);
+    overlay.querySelector('#cat-preview').innerHTML = `<span style="margin-right:4px">${el.dataset.catIcon}</span>${el.dataset.catName}`;
+    overlay.querySelector('#cat-grid').style.display = 'none';
+    overlay.querySelector('#cat-collapsed').style.display = 'flex';
   });
 
   delegate(overlay, 'click', '.numpad-key', (e, el) => {
     const key = el.dataset.key;
     if (key === '⌫') {
-      state.entryAmount = state.entryAmount.slice(0, -1);
+      state.entryPence = Math.floor(state.entryPence / 10);
     } else if (key === '.') {
-      if (!state.entryAmount.includes('.')) state.entryAmount += '.';
+      // no-op in smart pence mode — digits auto-fill from right
     } else {
-      const parts = state.entryAmount.split('.');
-      if (parts[1]?.length >= 2) return;
-      state.entryAmount += key;
+      const next = state.entryPence * 10 + parseInt(key);
+      if (next <= 9999999) state.entryPence = next;
     }
     updateAmountDisplay(overlay);
   });
@@ -237,12 +256,11 @@ async function openEntry(type, existingTxn = null) {
 
 function updateAmountDisplay(overlay) {
   const display = overlay.querySelector('#entry-display');
-  const val = parseFloat(state.entryAmount);
-  if (!state.entryAmount || isNaN(val)) {
+  if (state.entryPence === 0) {
     display.textContent = '£0.00';
     display.classList.add('placeholder');
   } else {
-    display.textContent = fmt(val);
+    display.textContent = fmt(state.entryPence / 100);
     display.classList.remove('placeholder');
   }
 }
@@ -253,8 +271,8 @@ function closeEntry() {
 }
 
 async function saveEntry(overlay) {
-  const amount = parseFloat(state.entryAmount);
-  if (!amount || isNaN(amount) || amount <= 0) { showToast('Enter an amount'); return; }
+  const amount = state.entryPence / 100;
+  if (!amount || amount <= 0) { showToast('Enter an amount'); return; }
   if (!state.entryCategory) { showToast('Select a category'); return; }
 
   const finalAmount = state.entryType === 'expense' ? -amount : amount;
@@ -300,7 +318,10 @@ async function renderTransactions() {
 
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
-  const monthTotal = txns.reduce((s, t) => s + t.amount, 0);
+
+  // Rolling balance to end of month (or today if month is current/future)
+  const effectiveDate = today() < monthEnd ? today() : monthEnd;
+  const { balance: monthTotal } = await calcRollingBalance(effectiveDate);
 
   const groups = {};
   for (const t of txns) {
@@ -381,11 +402,12 @@ async function renderTransactions() {
     </div>
   `;
 
-  viewContainer.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
-  viewContainer.querySelector('#txn-search').oninput = e => { state.txnSearchQuery = e.target.value; renderTransactions(); };
-  viewContainer.querySelector('#month-picker-btn').onclick = () => showMonthPicker();
-  delegate(viewContainer, 'click', '.txn-row', (e, el) => showTxnMenu(Number(el.dataset.txnId)));
-  delegate(viewContainer, 'click', '.day-add-btn', (e, el) => { state.entryDate = el.dataset.date; openEntry('expense'); });
+  const txnScreen = viewContainer.querySelector('.transactions-screen');
+  txnScreen.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
+  txnScreen.querySelector('#txn-search').oninput = e => { state.txnSearchQuery = e.target.value; renderTransactions(); };
+  txnScreen.querySelector('#month-picker-btn').onclick = () => showMonthPicker();
+  delegate(txnScreen, 'click', '.txn-row', (e, el) => showTxnMenu(Number(el.dataset.txnId)));
+  delegate(txnScreen, 'click', '.day-add-btn', (e, el) => { state.entryDate = el.dataset.date; openEntry('expense'); });
 }
 
 async function showMonthPicker() {
@@ -608,10 +630,11 @@ async function renderRecurring() {
     </div>
   `;
 
-  viewContainer.querySelector('#tab-exp').onclick = () => { state.recurringTab = 'expenses'; renderRecurring(); };
-  viewContainer.querySelector('#tab-inc').onclick = () => { state.recurringTab = 'income'; renderRecurring(); };
-  viewContainer.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
-  delegate(viewContainer, 'click', '.recurring-card', (e, el) => openRecurringEditor(Number(el.dataset.recId), el.dataset.recType));
+  const recScreen = viewContainer.firstElementChild;
+  recScreen.querySelector('#tab-exp').onclick = () => { state.recurringTab = 'expenses'; renderRecurring(); };
+  recScreen.querySelector('#tab-inc').onclick = () => { state.recurringTab = 'income'; renderRecurring(); };
+  recScreen.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
+  delegate(recScreen, 'click', '.recurring-card', (e, el) => openRecurringEditor(Number(el.dataset.recId), el.dataset.recType));
 }
 
 async function openRecurringEditor(id, type) {
@@ -770,14 +793,15 @@ async function renderDistributions() {
         <button class="icon-btn" id="dist-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
       ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
-      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.slice(0, 20).map(d => makeDistCard(d, catMap)).join('')}` : ''}
+      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.map(d => makeDistCard(d, catMap)).join('')}` : ''}
       ${dists.length === 0 ? `<div class="empty-state"><div class="empty-icon">📅</div><div class="empty-title">No big expenses</div><div class="empty-text">Spread large costs across a date range so they don't distort your daily balance.</div><button class="btn btn-primary" id="dist-empty-add">Add big expense</button></div>` : ''}
     </div>
   `;
 
-  viewContainer.querySelector('#dist-add-btn')?.addEventListener('click', () => openDistEditor(null, false));
-  viewContainer.querySelector('#dist-empty-add')?.addEventListener('click', () => openDistEditor(null, false));
-  delegate(viewContainer, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), false));
+  const distScreen = viewContainer.firstElementChild;
+  distScreen.querySelector('#dist-add-btn')?.addEventListener('click', () => openDistEditor(null, false));
+  distScreen.querySelector('#dist-empty-add')?.addEventListener('click', () => openDistEditor(null, false));
+  delegate(distScreen, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), false));
 }
 
 async function renderExtraIncomes() {
@@ -796,14 +820,15 @@ async function renderExtraIncomes() {
         <button class="icon-btn" id="extra-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
       ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
-      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.slice(0, 20).map(d => makeDistCard(d, catMap)).join('')}` : ''}
+      ${finished.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Completed</div>${finished.map(d => makeDistCard(d, catMap)).join('')}` : ''}
       ${dists.length === 0 ? `<div class="empty-state"><div class="empty-icon">💰</div><div class="empty-title">No extra incomes</div><div class="empty-text">Record lump-sum income spread across a date range, like a bonus or freelance payment.</div><button class="btn btn-primary" id="extra-empty-add">Add extra income</button></div>` : ''}
     </div>
   `;
 
-  viewContainer.querySelector('#extra-add-btn')?.addEventListener('click', () => openDistEditor(null, true));
-  viewContainer.querySelector('#extra-empty-add')?.addEventListener('click', () => openDistEditor(null, true));
-  delegate(viewContainer, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), true));
+  const extraScreen = viewContainer.firstElementChild;
+  extraScreen.querySelector('#extra-add-btn')?.addEventListener('click', () => openDistEditor(null, true));
+  extraScreen.querySelector('#extra-empty-add')?.addEventListener('click', () => openDistEditor(null, true));
+  delegate(extraScreen, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), true));
 }
 
 async function openDistEditor(id, isIncomeType = false) {
