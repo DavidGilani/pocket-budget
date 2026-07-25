@@ -1504,7 +1504,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v14)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v15)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -1681,21 +1681,26 @@ async function runDataMigrations() {
   }
 
   if (ver < 3) {
-    // Regenerate missing distribution children (distributions synced from Firestore
-    // may have no child transactions if they were never locally saved on this device)
-    const allDists = await db.distributions.toArray();
-    for (const dist of allDists) {
-      const childCount = await db.transactions.where('distributionId').equals(dist.id).count();
-      if (childCount === 0 && dist.startDate && dist.endDate) {
-        const children = generateDistributionChildren(dist);
-        await db.transactions.bulkAdd(children);
-        const newChildren = await db.transactions.where('distributionId').equals(dist.id).toArray();
-        for (const c of newChildren) {
-          try { await queueWrite('transactions', c.id); } catch {}
-        }
-      }
-    }
+    // Mark done immediately so app isn't blocked; heavy work runs in background
     await setSetting('dataVersion', 3);
+    // Regenerate missing children asynchronously after app renders
+    setTimeout(async () => {
+      try {
+        const allDists = await db.distributions.toArray();
+        for (const dist of allDists) {
+          const childCount = await db.transactions.where('distributionId').equals(dist.id).count();
+          if (childCount === 0 && dist.startDate && dist.endDate) {
+            const children = generateDistributionChildren(dist);
+            await db.transactions.bulkAdd(children);
+            // Fire Firestore writes without awaiting — offline persistence retries automatically
+            const newChildren = await db.transactions.where('distributionId').equals(dist.id).toArray();
+            newChildren.forEach(c => queueWrite('transactions', c.id).catch(() => {}));
+          }
+        }
+      } catch (e) {
+        console.warn('Distribution child migration failed:', e);
+      }
+    }, 2000);
   }
 }
 
