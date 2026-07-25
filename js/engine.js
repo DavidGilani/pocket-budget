@@ -50,7 +50,7 @@ export async function calcDailyAllowance(cycleStart, cycleEnd) {
   const monthlyExpenses  = await getCycleRecurringExpenses(cycleStart, cycleEnd);
   const monthlySavings   = await getSavingsTarget();
   const available = monthlyIncome - monthlyExpenses - monthlySavings;
-  const dailyAllowance = (available * cycleLen / 30) / cycleLen;
+  const dailyAllowance = available / cycleLen;
   return { dailyAllowance, monthlyIncome, monthlyExpenses, monthlySavings, available, cycleLen };
 }
 

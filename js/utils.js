@@ -95,8 +95,8 @@ export function monthlyEquivalent(amount, frequency) {
   }
 }
 
-export function dailyEquivalent(amount, frequency) {
-  return monthlyEquivalent(amount, frequency) * 12 / 365;
+export function dailyEquivalent(amount, frequency, daysInCycle = 30) {
+  return monthlyEquivalent(amount, frequency) / daysInCycle;
 }
 
 export function el(tag, attrs = {}, ...children) {

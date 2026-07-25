@@ -578,8 +578,9 @@ async function renderRecurring() {
 
   items.sort((a, b) => monthlyEquivalent(b.amount ?? 0, b.frequency ?? 'monthly') - monthlyEquivalent(a.amount ?? 0, a.frequency ?? 'monthly'));
 
+  const cycleLen = diffDays(cycle.start, cycle.end) + 1;
   const totalMonthly = items.reduce((s, r) => s + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
-  const totalDaily = totalMonthly * 12 / 365;
+  const totalDaily = totalMonthly / cycleLen;
 
   const formatMeta = r => {
     const start = r.startDate ? fmtDate(r.startDate) : '-';
@@ -622,7 +623,7 @@ async function renderRecurring() {
               <div class="recurring-card-meta">${formatMeta(r)}</div>
             </div>
             <div class="recurring-card-amount">
-              <div class="recurring-card-daily">${fmt(dailyEquivalent(r.amount, r.frequency ?? 'monthly'))}<span style="font-size:14px;font-weight:400"> /day</span></div>
+              <div class="recurring-card-daily">${fmt(dailyEquivalent(r.amount, r.frequency ?? 'monthly', cycleLen))}<span style="font-size:14px;font-weight:400"> /day</span></div>
             </div>
           </div>
         `).join('')}
