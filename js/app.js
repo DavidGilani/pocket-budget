@@ -898,11 +898,8 @@ async function renderRecurring() {
     const next = isoDate(new Date(y, m, 1));
     if (next <= today()) { state.recurringCycle = cycleForDate(next); renderRecurring(); }
   };
-  if (isCurrentCycle) recScreen.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
-  else recScreen.querySelector('#rec-add-btn').style.display = 'none';
-  delegate(recScreen, 'click', '.recurring-card', (e, el) => {
-    if (isCurrentCycle) openRecurringEditor(Number(el.dataset.recId), el.dataset.recType);
-  });
+  recScreen.querySelector('#rec-add-btn').onclick = () => openRecurringEditor(null, tab);
+  delegate(recScreen, 'click', '.recurring-card', (e, el) => openRecurringEditor(Number(el.dataset.recId), el.dataset.recType));
 }
 
 async function openRecurringEditor(id, type) {
@@ -1428,7 +1425,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">Pocket Ledger - Personal Finance<br>Data stored locally on this device</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v12)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();

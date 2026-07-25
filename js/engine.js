@@ -13,28 +13,26 @@ export async function getCycleForDate(dateStr) {
   return cycleForDate(dateStr, startDay);
 }
 
+function inCycle(r, cycleStart, cycleEnd) {
+  return r.startDate <= cycleEnd && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart);
+}
+
 export async function getCycleRecurringIncome(cycleStart, cycleEnd) {
-  const rows = await db.recurringIncome
-    .where('startDate').belowOrEqual(cycleEnd)
-    .toArray();
-  return rows
-    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart))
+  const rows = await db.recurringIncome.where('startDate').belowOrEqual(cycleEnd).toArray();
+  return rows.filter(r => inCycle(r, cycleStart, cycleEnd))
     .reduce((sum, r) => sum + (r.amount ?? 0), 0);
 }
 
 export async function getCycleRecurringExpenses(cycleStart, cycleEnd) {
-  const rows = await db.recurringExpenses
-    .where('startDate').belowOrEqual(cycleEnd)
-    .toArray();
-  return rows
-    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart))
+  const rows = await db.recurringExpenses.where('startDate').belowOrEqual(cycleEnd).toArray();
+  return rows.filter(r => inCycle(r, cycleStart, cycleEnd))
     .reduce((sum, r) => sum + monthlyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly'), 0);
 }
 
-export async function getSavingsTarget() {
-  const now = today();
+export async function getSavingsTarget(forDate) {
+  const d = forDate ?? today();
   const targets = await db.savingsTargets
-    .filter(t => t.startDate <= now && (t.endDate == null || t.endDate >= now || t.endDate === '4001-01-01'))
+    .filter(t => t.startDate <= d && (t.endDate == null || t.endDate >= d || t.endDate === '4001-01-01'))
     .toArray();
   if (!targets.length) return 0;
   targets.sort((a, b) => b.startDate.localeCompare(a.startDate));
@@ -45,13 +43,13 @@ export async function calcDailyAllowance(cycleStart, cycleEnd) {
   const cycleLen = diffDays(cycleStart, cycleEnd) + 1;
   const monthlyIncome   = await getCycleRecurringIncome(cycleStart, cycleEnd);
   const monthlyExpenses = await getCycleRecurringExpenses(cycleStart, cycleEnd);
-  const monthlySavings  = await getSavingsTarget();
+  const monthlySavings  = await getSavingsTarget(cycleStart);
   const available = monthlyIncome - monthlyExpenses - monthlySavings;
 
   // Use per-frequency daily rates so yearly expenses use amount/365, not amount/12/cycleLen
   const expRows = await db.recurringExpenses.where('startDate').belowOrEqual(cycleEnd).toArray();
   const dailyExpenses = expRows
-    .filter(r => r.isActive && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart))
+    .filter(r => inCycle(r, cycleStart, cycleEnd))
     .reduce((s, r) => s + dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cycleLen), 0);
 
   const dailyAllowance = monthlyIncome / cycleLen - dailyExpenses - monthlySavings / cycleLen;
