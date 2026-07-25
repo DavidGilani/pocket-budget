@@ -31,7 +31,7 @@ const SEED_CATEGORIES = [
   { id:11, name:'Leisure',                icon:'🏖️', colour:'#00BCD4', isIncome:false, sortOrder:11, isArchived:false, legacyId:32 },
   { id:12, name:'Education',              icon:'📚', colour:'#3F51B5', isIncome:false, sortOrder:12, isArchived:false, legacyId:25 },
   { id:13, name:'Extra income',           icon:'💰', colour:'#43A047', isIncome:true,  sortOrder:13, isArchived:false, legacyId:27 },
-  { id:14, name:'Expenses reimbursement', icon:'💼', colour:'#009688', isIncome:true,  sortOrder:14, isArchived:false, legacyId:6  },
+  { id:14, name:'Expenses', icon:'💼', colour:'#009688', isIncome:true,  sortOrder:14, isArchived:false, legacyId:6  },
   { id:15, name:'Socializing',   icon:'🍻', colour:'#FF9800', isIncome:false, sortOrder:99, isArchived:true, legacyId:3  },
   { id:16, name:'Health',        icon:'🏥', colour:'#F44336', isIncome:false, sortOrder:99, isArchived:true, legacyId:22 },
   { id:17, name:'Bills',         icon:'📋', colour:'#607D8B', isIncome:false, sortOrder:99, isArchived:true, legacyId:20 },

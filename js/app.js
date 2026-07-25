@@ -154,13 +154,13 @@ async function renderBalance() {
   const prevBal = state.prevBalance;
   state.prevBalance = todayBal;
   if (prevBal !== null && Math.abs(prevBal - todayBal) > 0.005) {
-    animateCounter(viewContainer.querySelector('.balance-amount'), prevBal, todayBal, 420);
+    animateCounter(viewContainer.querySelector('.balance-amount'), prevBal, todayBal, 630);
   }
 
   // Animate projection bars (always — gives a nice entrance on every load)
   requestAnimationFrame(() => requestAnimationFrame(() => {
     viewContainer.querySelectorAll('.proj-bar').forEach(bar => {
-      bar.style.transition = 'height 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)';
+      bar.style.transition = 'height 0.675s cubic-bezier(0.34, 1.56, 0.64, 1)';
       bar.style.height = bar.dataset.targetH + 'px';
     });
   }));
@@ -203,16 +203,16 @@ async function openEntry(type, existingTxn = null) {
           ${state.entryPence > 0 ? fmt(state.entryPence / 100) : '£0.00'}
         </div>
 
-        <div class="entry-field cat-collapsed-row" id="cat-collapsed" style="${hasCategory ? '' : 'display:none'}">
+        <div class="entry-field cat-collapsed-row" id="cat-collapsed">
           <span class="entry-field-icon">🏷️</span>
           <label>Category</label>
           <div id="cat-preview" style="flex:1;font-size:15px;color:var(--text)">
-            ${hasCategory ? `<span style="margin-right:4px">${selectedCat.icon}</span>${selectedCat.name}` : ''}
+            ${hasCategory ? `<span style="margin-right:4px">${selectedCat.icon}</span>${selectedCat.name}` : '<span style="color:var(--text-2)">None</span>'}
           </div>
           <span style="color:var(--text-2);font-size:18px">›</span>
         </div>
 
-        <div class="cat-grid" id="cat-grid" style="${hasCategory ? 'display:none' : ''}">
+        <div class="cat-grid" id="cat-grid" style="display:none">
           ${cats.map(c => `
             <div class="cat-item ${state.entryCategory === c.id ? 'selected' : ''}"
                  data-cat="${c.id}" data-cat-name="${c.name}" data-cat-icon="${c.icon}">
@@ -253,8 +253,8 @@ async function openEntry(type, existingTxn = null) {
   overlay.querySelector('#entry-close').onclick = closeEntry;
 
   overlay.querySelector('#cat-collapsed').onclick = () => {
-    overlay.querySelector('#cat-collapsed').style.display = 'none';
-    overlay.querySelector('#cat-grid').style.display = '';
+    const grid = overlay.querySelector('#cat-grid');
+    grid.style.display = grid.style.display === 'none' ? '' : 'none';
   };
 
   delegate(overlay, 'click', '.cat-item', (e, el) => {
@@ -263,7 +263,6 @@ async function openEntry(type, existingTxn = null) {
     state.entryCategory = Number(el.dataset.cat);
     overlay.querySelector('#cat-preview').innerHTML = `<span style="margin-right:4px">${el.dataset.catIcon}</span>${el.dataset.catName}`;
     overlay.querySelector('#cat-grid').style.display = 'none';
-    overlay.querySelector('#cat-collapsed').style.display = 'flex';
     setupNoteAutocomplete(overlay);
   });
 
@@ -645,7 +644,7 @@ async function showMonthPicker() {
           const isSel = mk === currentKey;
           return `<div class="settings-row month-pick-row" data-month="${mk}" style="${isSel ? 'color:var(--blue)' : ''}">
             <span style="flex:1;font-size:15px">${label}</span>
-            <span style="font-size:13px;color:${bal >= 0 ? 'var(--green)' : 'var(--red)'}">${new Date(y, m, 0).getDate()} days · Budget left: ${fmt(bal)}</span>
+            <span style="font-size:13px;color:${bal >= 0 ? 'var(--green)' : 'var(--red)'}">Budget left: ${fmt(bal)}</span>
             ${isSel ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" style="margin-left:8px"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
           </div>`;
         }).join('')}
@@ -702,13 +701,14 @@ async function renderBreakdown() {
   const cycle = state.viewingCycle;
   const bd = await getCycleBreakdown(cycle.start, cycle.end);
 
+  const cycleLen = diffDays(cycle.start, cycle.end) + 1;
   const rows = [
-    { icon: '💰', bg: '#e8f5e9', label: 'Income', amount: bd.totalIncome, amountClass: 'text-green',
+    { icon: '💰', bg: '#e8f5e9', label: 'Income', amount: bd.totalIncome, daily: bd.regularIncome / cycleLen, amountClass: 'text-green',
       subs: [{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Variable income', amount: bd.variableIncome }] },
-    { icon: '🛒', bg: '#ffebee', label: 'Expenses', amount: bd.totalExpenses, amountClass: 'text-red',
+    { icon: '🛒', bg: '#ffebee', label: 'Expenses', amount: bd.totalExpenses, daily: bd.recurringExpenses / cycleLen, amountClass: 'text-red',
       subs: [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
-    { icon: '💛', bg: '#fffde7', label: 'Savings', amount: bd.savings, amountClass: '', subs: [] },
-    { icon: '📊', bg: '#e3f2fd', label: 'Budget left', amount: bd.budgetLeft, amountClass: bd.budgetLeft >= 0 ? 'text-green' : 'text-red', subs: [] },
+    { icon: '💛', bg: '#fffde7', label: 'Savings', amount: bd.savings, daily: bd.savings / cycleLen, amountClass: '', subs: [] },
+    { icon: '📊', bg: '#e3f2fd', label: 'Budget left', amount: bd.budgetLeft, daily: null, amountClass: bd.budgetLeft >= 0 ? 'text-green' : 'text-red', subs: [] },
   ];
 
   viewContainer.innerHTML = `
@@ -734,7 +734,10 @@ async function renderBreakdown() {
             <div class="breakdown-row">
               <div class="breakdown-row-icon" style="background:${row.bg}">${row.icon}</div>
               <div class="breakdown-row-info"><div class="breakdown-row-label">${row.label}</div></div>
-              <div class="breakdown-row-amount ${row.amountClass}">${fmt(Math.abs(row.amount))}</div>
+              <div class="breakdown-row-amount ${row.amountClass}">
+                ${fmt(Math.abs(row.amount))}
+                ${row.daily != null ? `<div style="font-size:11px;font-weight:400;color:var(--text-2)">${fmt(Math.abs(row.daily))}/day</div>` : ''}
+              </div>
             </div>
             ${row.subs.filter(s => s.amount !== 0).map(s => `
               <div class="breakdown-sub-rows">
@@ -1479,6 +1482,16 @@ async function runDataMigrations() {
     }
 
     await setSetting('dataVersion', 1);
+  }
+
+  if (ver < 2) {
+    // Rename "Expenses reimbursement" → "Expenses" in db.categories
+    const cat = await db.categories.get(14);
+    if (cat && cat.name === 'Expenses reimbursement') {
+      await db.categories.update(14, { name: 'Expenses' });
+      try { await queueWrite('categories', 14); } catch {}
+    }
+    await setSetting('dataVersion', 2);
   }
 }
 
