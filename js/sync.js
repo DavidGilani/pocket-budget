@@ -101,6 +101,11 @@ export async function flushSyncQueue() {
 
 // ── Write/Delete a single record to Firestore ─────────────────────────────────
 export async function queueWrite(tableName, id) {
+  // Distribution children are never synced — they're regenerated from distributions.
+  if (tableName === 'transactions') {
+    const tx = await db.transactions.get(Number(id));
+    if (tx?.distributionId) return;
+  }
   if (!auth.currentUser) {
     // Auth not ready yet — persist locally and flush when auth is restored
     await enqueue('write', tableName, id);
@@ -124,6 +129,10 @@ export async function queueWrite(tableName, id) {
 }
 
 export async function queueDelete(tableName, id) {
+  if (tableName === 'transactions') {
+    const tx = await db.transactions.get(Number(id));
+    if (tx?.distributionId) return;
+  }
   if (!auth.currentUser) {
     await enqueue('delete', tableName, id);
     return;
@@ -239,7 +248,10 @@ export async function uploadAllToFirestore(onProgress) {
 
   for (let ti = startIdx; ti < UPLOAD_ORDER.length && !fatal; ti++) {
     const tableName = UPLOAD_ORDER[ti];
-    const records = await db[tableName].toArray();
+    let records = await db[tableName].toArray();
+    // Distribution children are regenerated locally from distributions — skip
+    // them to cut ~92% of write volume and stay inside the free-tier quota.
+    if (tableName === 'transactions') records = records.filter(r => !r.distributionId);
     const from = (ti === startIdx && cursor) ? (cursor.offset ?? 0) : 0;
     let uploaded = from;
     let tableErr = null;
@@ -326,8 +338,14 @@ export async function getCloudCounts() {
 export async function pingFirestore() {
   if (!auth.currentUser) throw new Error('Not signed in');
   const ref = doc(firestore, 'users', auth.currentUser.uid, '_diagnostics', 'ping');
-  await setDoc(ref, { at: serverTimestamp(), ua: navigator.userAgent.slice(0, 120) });
-  const snap = await getDoc(ref);
+  const timeout = new Promise((_, rej) =>
+    setTimeout(() => rej(Object.assign(new Error('timed out after 8s'), { code: 'deadline-exceeded' })), 8000)
+  );
+  await Promise.race([
+    setDoc(ref, { at: serverTimestamp(), ua: navigator.userAgent.slice(0, 120) }),
+    timeout,
+  ]);
+  const snap = await Promise.race([getDoc(ref), timeout]);
   if (!snap.exists()) throw new Error('write succeeded but read-back returned nothing');
   await deleteDoc(ref).catch(() => {});
   return true;
@@ -347,7 +365,7 @@ async function isFirestoreInitialized() {
 }
 
 // ── Bootstrap sync on sign-in ─────────────────────────────────────────────────
-export function initSync(onAuthStateChange) {
+export function initSync(onAuthStateChange, afterPull) {
   return onAuthChange(async user => {
     onAuthStateChange?.(user);
     if (!user) { notify(); return; }
@@ -363,6 +381,7 @@ export function initSync(onAuthStateChange) {
         if (await isFirestoreInitialized()) {
           // Another device already seeded Firestore — pull everything down
           await pullFromFirestore(true);
+          await afterPull?.().catch(e => console.warn('afterPull:', e));
         } else {
           // This is the first device — push everything up
           await uploadAllToFirestore();
@@ -372,6 +391,7 @@ export function initSync(onAuthStateChange) {
         // Returning device — pull remote changes, then push any locally queued writes
         await pullFromFirestore();
         await flushSyncQueue();
+        await afterPull?.().catch(e => console.warn('afterPull:', e));
       }
     } catch (e) {
       syncState = { active: false, error: e.message };

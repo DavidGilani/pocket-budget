@@ -141,6 +141,20 @@ function showUploadReport(report, errorMsg) {
   el.querySelector('#rep-close').onclick = () => el.remove();
 }
 
+// Re-derive distribution children locally after a pull. Distribution rows
+// themselves are synced; their daily child transactions are regenerated on each
+// device so we never have to write those ~16k rows to Firestore.
+async function regenerateAllDistributionChildren() {
+  const dists = await db.distributions.toArray();
+  const childIds = await db.transactions.where('distributionId').above(0).primaryKeys();
+  if (childIds.length) await db.transactions.bulkDelete(childIds);
+  for (const dist of dists) {
+    if (!dist.id) continue;
+    const children = generateDistributionChildren(dist);
+    if (children.length) await db.transactions.bulkPut(children);
+  }
+}
+
 async function renderBalance() {
   const [projections, cycle] = await Promise.all([
     calcProjectedBalances(3),
@@ -2977,7 +2991,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 15:10 BST (v30)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 16:00 BST (v31)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -3006,6 +3020,7 @@ async function renderSettings() {
     showToast('Syncing…');
     const pushed = await flushSyncQueue();
     await pullFromFirestore();
+    await regenerateAllDistributionChildren();
     showToast(pushed > 0 ? `Synced — pushed ${pushed} pending change${pushed === 1 ? '' : 's'}` : 'Sync complete');
     renderSettings();
   };
@@ -3034,6 +3049,7 @@ async function renderSettings() {
     const prog = showProgressOverlay('Downloading from cloud');
     try {
       const pulled = await downloadAllFromCloud();
+      await regenerateAllDistributionChildren();
       prog.close();
       showToast(`Restored ${pulled} record${pulled === 1 ? '' : 's'} from cloud`);
     } catch (e) {
@@ -3353,7 +3369,7 @@ async function init() {
   initSync(user => {
     state.currentUser = user;
     if (state.view === 'settings') renderSettings();
-  });
+  }, regenerateAllDistributionChildren);
   onSync(() => {
     if (state.view === 'settings') renderSettings();
   });
