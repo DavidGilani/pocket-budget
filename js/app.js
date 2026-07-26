@@ -26,6 +26,8 @@ const state = {
   currentUser: null,
   txnMonth: null,
   prevBalance: null,
+  householdBillsMonth: null,
+  yearlyTrendsYear: null,
 };
 
 const viewContainer = document.getElementById('view');
@@ -65,6 +67,8 @@ async function renderView(view) {
       case 'accounts':     await renderAccounts(); break;
       case 'netWealth':    await renderNetWealth(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
+      case 'householdBills': await renderHouseholdBills(); break;
+      case 'yearlyTrends': await renderYearlyTrends(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
       default:             await renderBalance();
@@ -1033,6 +1037,126 @@ async function renderRecurring() {
   delegate(recScreen, 'click', '.recurring-card', (e, el) => openRecurringEditor(Number(el.dataset.recId), el.dataset.recType));
 }
 
+// ── Household Bills ───────────────────────────────────────────────────────────
+async function renderHouseholdBills() {
+  if (!state.householdBillsMonth) state.householdBillsMonth = today().slice(0, 7);
+  const [ym_y, ym_m] = state.householdBillsMonth.split('-').map(Number);
+  const cycleStart = isoDate(new Date(ym_y, ym_m - 1, 1));
+  const cycleEnd   = isoDate(new Date(ym_y, ym_m, 0));
+  const cycleLen   = diffDays(cycleStart, cycleEnd) + 1;
+  const monthLabel = new Date(cycleStart + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const isCurrentMonth = state.householdBillsMonth === today().slice(0, 7);
+
+  const activeFilter = r => r.startDate <= cycleEnd && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= cycleStart);
+  const allExpenses = (await db.recurringExpenses.toArray()).filter(activeFilter);
+
+  function monthlyAmt(r, cs = cycleStart, ce = cycleEnd, cl = cycleLen) {
+    const effStart = r.startDate > cs ? r.startDate : cs;
+    const effEnd   = (!r.endDate || r.endDate === '4001-01-01' || r.endDate > ce) ? ce : r.endDate;
+    const overlap  = Math.max(0, diffDays(effStart, effEnd) + 1);
+    return dailyEquivalent(r.amount ?? 0, r.frequency ?? 'monthly', cl) * overlap;
+  }
+
+  allExpenses.sort((a, b) => monthlyAmt(b) - monthlyAmt(a));
+  const richOwes = allExpenses.filter(r => r.isShared).reduce((s, r) => s + monthlyAmt(r), 0);
+
+  // History: last 6 months (including current)
+  const allRecurring = await db.recurringExpenses.toArray();
+  const history = [];
+  for (let i = 5; i >= 0; i--) {
+    const dt   = new Date(ym_y, ym_m - 1 - i, 1);
+    const hS   = isoDate(dt);
+    const hE   = isoDate(new Date(dt.getFullYear(), dt.getMonth() + 1, 0));
+    const hL   = diffDays(hS, hE) + 1;
+    const hLbl = dt.toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
+    const hAct = r => r.startDate <= hE && (r.endDate == null || r.endDate === '4001-01-01' || r.endDate >= hS);
+    const hTotal = allRecurring.filter(r => hAct(r) && r.isShared).reduce((s, r) => s + monthlyAmt(r, hS, hE, hL), 0);
+    history.push({ label: hLbl, total: hTotal, isCurrent: i === 0 });
+  }
+
+  viewContainer.innerHTML = `
+    <div class="recurring-screen">
+      <div class="recurring-hero" style="background:linear-gradient(160deg,#1565c0 0%,#1a73e8 100%);position:relative">
+        <button class="icon-btn" onclick="window.app.navigate('settings')" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="recurring-hero-icon">🏠</div>
+        <div class="recurring-hero-total">Rich owes</div>
+        <div class="recurring-hero-amount">${fmt(richOwes)}<span style="font-size:16px;opacity:0.7"> /month</span></div>
+        <div class="breakdown-cycle-nav" style="background:rgba(0,0,0,0.15);border-radius:20px;margin:8px auto 0;width:fit-content;padding:2px 4px">
+          <button class="cycle-nav-btn" id="hb-prev" style="color:white;opacity:0.9">&lt;</button>
+          <span style="color:white;font-size:13px;min-width:130px;text-align:center">${monthLabel}</span>
+          <button class="cycle-nav-btn" id="hb-next" style="color:white;opacity:0.9;visibility:${isCurrentMonth ? 'hidden' : 'visible'}">&gt;</button>
+        </div>
+      </div>
+
+      <div class="recurring-list">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.05em">RECURRING EXPENSES</div>
+          <button class="btn" id="hb-copy" style="padding:5px 12px;font-size:12px">📋 Copy total</button>
+        </div>
+        ${allExpenses.length === 0 ? `<div class="empty-state"><div class="empty-text">No recurring expenses this month</div></div>` : ''}
+        ${allExpenses.map(r => {
+          const monthly = monthlyAmt(r);
+          return `
+          <div class="recurring-card" style="align-items:center;gap:10px">
+            <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;min-width:0">
+              <input type="checkbox" class="hb-toggle" data-id="${r.id}" ${r.isShared ? 'checked' : ''}
+                     style="width:20px;height:20px;flex-shrink:0;accent-color:var(--blue);cursor:pointer">
+              <div style="flex:1;min-width:0">
+                <div class="recurring-card-name">${r.description}</div>
+                <div class="recurring-card-meta" style="color:${r.isShared ? 'var(--blue)' : 'var(--text-2)'}">
+                  ${r.isShared ? '✓ Rich pays half' : 'David only'}
+                </div>
+              </div>
+            </label>
+            <div style="font-weight:700;font-size:15px;color:${r.isShared ? 'var(--blue)' : 'var(--text-2)'}">
+              ${r.isShared ? fmt(monthly) : '—'}
+            </div>
+          </div>`;
+        }).join('')}
+        <div style="border-top:1.5px solid var(--border);margin-top:8px;padding-top:10px;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700;font-size:15px">Total Rich owes</span>
+          <span style="font-weight:800;font-size:18px;color:var(--blue)">${fmt(richOwes)}</span>
+        </div>
+      </div>
+
+      <div class="recurring-list" style="margin-top:4px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.05em;margin-bottom:8px">HISTORY</div>
+        ${history.map(h => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
+            <span style="color:${h.isCurrent ? 'var(--text)' : 'var(--text-2)'};font-weight:${h.isCurrent ? '600' : '400'}">${h.label}</span>
+            <span style="font-weight:${h.isCurrent ? '700' : '400'};color:${h.isCurrent ? 'var(--blue)' : 'var(--text)'}">${fmt(h.total)}</span>
+          </div>`).join('')}
+      </div>
+      <div style="height:80px"></div>
+    </div>
+  `;
+
+  viewContainer.querySelector('#hb-copy').onclick = () => {
+    const text = `${monthLabel} — Rich owes ${fmt(richOwes)} for household bills`;
+    navigator.clipboard?.writeText(text).catch(() => {}).finally(() => showToast('Copied!'));
+  };
+  viewContainer.querySelector('#hb-prev').onclick = () => {
+    const [y, m] = state.householdBillsMonth.split('-').map(Number);
+    state.householdBillsMonth = isoDate(new Date(y, m - 2, 1)).slice(0, 7);
+    renderHouseholdBills();
+  };
+  const hbNext = viewContainer.querySelector('#hb-next');
+  if (hbNext) hbNext.onclick = () => {
+    const [y, m] = state.householdBillsMonth.split('-').map(Number);
+    const next = isoDate(new Date(y, m, 1)).slice(0, 7);
+    if (next <= today().slice(0, 7)) { state.householdBillsMonth = next; renderHouseholdBills(); }
+  };
+  viewContainer.querySelectorAll('.hb-toggle').forEach(cb => {
+    cb.addEventListener('change', async () => {
+      await db.recurringExpenses.update(Number(cb.dataset.id), { isShared: cb.checked });
+      queueWrite('recurringExpenses', Number(cb.dataset.id)).catch(() => {});
+      renderHouseholdBills();
+    });
+  });
+}
+
 async function openRecurringEditor(id, type) {
   const isExpense = type === 'expenses';
   let item = id ? (isExpense ? await db.recurringExpenses.get(id) : await db.recurringIncome.get(id)) : null;
@@ -1217,6 +1341,9 @@ async function renderAnalysis() {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
+      <div style="padding:4px 16px 8px">
+        <button class="chip" id="btn-yearly-trends" style="font-size:13px;padding:6px 14px">📅 Yearly trends</button>
+      </div>
       <div class="analysis-section">
         <div class="analysis-section-title">Rolling balance</div>
         <div class="chart-wrap"><canvas id="chart-balance"></canvas></div>
@@ -1347,12 +1474,284 @@ async function renderAnalysis() {
     await renderAnalysis();
   });
 
+  viewContainer.querySelector('#btn-yearly-trends').addEventListener('click', () => {
+    state.yearlyTrendsYear = new Date().getFullYear();
+    navigate('yearlyTrends');
+  });
+
   // Category compare toggle
   viewContainer.querySelector('#compare-last').addEventListener('click', () => {
     state.analysisCatCompare = 'lastMonth'; renderAnalysis();
   });
   viewContainer.querySelector('#compare-avg').addEventListener('click', () => {
     state.analysisCatCompare = 'avg12'; renderAnalysis();
+  });
+}
+
+// ── Yearly Trends ─────────────────────────────────────────────────────────────
+async function renderYearlyTrends() {
+  const year = state.yearlyTrendsYear ?? new Date().getFullYear();
+  const todayStr = today();
+  const yearStart = `${year}-01-01`;
+  const yearEnd   = `${year}-12-31`;
+  const prevYearStart = `${year - 1}-01-01`;
+  const prevYearEnd   = `${year - 1}-12-31`;
+  const yTick = v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(1)}k` : `£${v.toFixed(0)}`;
+  const fmtTip = v => '£' + Math.abs(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const cats = await db.categories.toArray();
+  const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
+
+  // Fetch both years' transactions in parallel
+  const [yearTxns, prevTxns] = await Promise.all([
+    db.transactions.where('date').between(yearStart, yearEnd, true, true).toArray(),
+    db.transactions.where('date').between(prevYearStart, prevYearEnd, true, true).toArray(),
+  ]);
+
+  // ── Month-by-month savings & surplus ──────────────────────────────────────
+  const monthlyData = [];
+  let cumulativeSaved = 0;
+
+  for (let m = 1; m <= 12; m++) {
+    const mStart = isoDate(new Date(year, m - 1, 1));
+    const mEnd   = isoDate(new Date(year, m, 0));
+    if (mStart > todayStr) break;
+
+    const cutoff = mEnd < todayStr ? mEnd : todayStr;
+    const { dailyAllowance, monthlySavings, cycleLen } = await calcDailyAllowance(mStart, mEnd);
+    const daysElapsed = mEnd < todayStr ? cycleLen : (diffDays(mStart, todayStr) + 1);
+
+    const mTxns = yearTxns.filter(t => t.date >= mStart && t.date <= cutoff);
+    let varExp = 0, varInc = 0;
+    for (const t of mTxns) {
+      if (t.amount < 0) varExp += Math.abs(t.amount);
+      else varInc += t.amount;
+    }
+
+    const balance = dailyAllowance * daysElapsed - varExp + varInc;
+    const monthSaved = monthlySavings + balance;
+    cumulativeSaved += monthSaved;
+
+    const label = new Date(mStart + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short' });
+    monthlyData.push({ m, label, balance, monthlySavings, monthSaved, cumulativeSaved });
+  }
+
+  // ── Category spending: year vs prev year ──────────────────────────────────
+  const isExp = t => t.type === 'expense' || t.type === 'distributed_expense';
+  const byCat = {}, prevByCat = {};
+  for (const t of yearTxns.filter(isExp)) byCat[t.categoryId] = (byCat[t.categoryId] ?? 0) + Math.abs(t.amount);
+  for (const t of prevTxns.filter(isExp)) prevByCat[t.categoryId] = (prevByCat[t.categoryId] ?? 0) + Math.abs(t.amount);
+  const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const totalYearSpend = Object.values(byCat).reduce((s, v) => s + v, 0);
+  const totalPrevSpend = Object.values(prevByCat).reduce((s, v) => s + v, 0);
+
+  // ── Variable spending by month: current vs prev year ──────────────────────
+  const varByMonth = Array.from({ length: 12 }, (_, i) => {
+    const ms = `${year}-${String(i + 1).padStart(2, '0')}`;
+    const ps = `${year - 1}-${String(i + 1).padStart(2, '0')}`;
+    const cur = yearTxns.filter(t => t.date.startsWith(ms) && isExp(t)).reduce((s, t) => s + Math.abs(t.amount), 0);
+    const prev = prevTxns.filter(t => t.date.startsWith(ps) && isExp(t)).reduce((s, t) => s + Math.abs(t.amount), 0);
+    return { label: new Date(year, i, 1).toLocaleDateString('en-GB', { month: 'short' }), cur, prev };
+  });
+
+  // ── Top 5 spends (grouped by note) ───────────────────────────────────────
+  const spendByName = {};
+  for (const t of yearTxns.filter(isExp)) {
+    const key = (t.note ?? '').trim() || 'Unnamed';
+    if (!spendByName[key]) spendByName[key] = { total: 0, count: 0, categoryId: t.categoryId };
+    spendByName[key].total += Math.abs(t.amount);
+    spendByName[key].count++;
+  }
+  const top5Spends = Object.entries(spendByName).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
+
+  // ── Top 5 extra incomes (type='income', grouped by note) ─────────────────
+  const incomeByName = {};
+  for (const t of yearTxns.filter(t => t.type === 'income')) {
+    const key = (t.note ?? '').trim() || 'Unnamed';
+    if (!incomeByName[key]) incomeByName[key] = { total: 0, count: 0 };
+    incomeByName[key].total += t.amount;
+    incomeByName[key].count++;
+  }
+  const top5Incomes = Object.entries(incomeByName).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
+
+  const finalSaved = monthlyData.at(-1)?.cumulativeSaved ?? 0;
+
+  viewContainer.innerHTML = `
+    <div class="analysis-screen">
+      <div class="screen-header" style="padding-top:52px">
+        <button class="icon-btn" id="yt-back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="screen-title">${year} · Yearly Trends</span>
+        <div style="display:flex;gap:0">
+          <button class="icon-btn" id="yt-prev">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button class="icon-btn" id="yt-next" ${year >= new Date().getFullYear() ? 'style="opacity:.3;pointer-events:none"' : ''}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Running savings total -->
+      <div class="analysis-section">
+        <div class="analysis-section-title">Running savings total — ${year}</div>
+        <div style="text-align:center;padding:6px 0 12px">
+          <div style="font-size:32px;font-weight:800;color:${finalSaved >= 0 ? '#43a047' : '#e53935'}">${fmt(Math.abs(finalSaved))}</div>
+          <div style="font-size:12px;color:var(--text-2)">${finalSaved >= 0 ? 'total saved so far' : 'in deficit so far'}</div>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-yt-savings"></canvas></div>
+      </div>
+
+      <!-- Monthly surplus / loss -->
+      <div class="analysis-section">
+        <div class="analysis-section-title">Monthly surplus / loss</div>
+        <div class="chart-wrap"><canvas id="chart-yt-surplus"></canvas></div>
+      </div>
+
+      <!-- Spending by category vs previous year -->
+      <div class="analysis-section">
+        <div class="analysis-section-title">
+          Spending by category
+          <span style="float:right;font-size:12px;color:var(--text-2);font-weight:400">${year} vs ${year - 1}</span>
+        </div>
+        ${catRows.length === 0
+          ? '<div class="empty-state" style="padding:12px 0"><div class="empty-text">No spending data yet</div></div>'
+          : catRows.map(([cid, total]) => {
+              const cat = catMap[cid];
+              const prev = prevByCat[cid] ?? 0;
+              const diff = total - prev;
+              const diffStr = prev > 0
+                ? `<span style="font-size:12px;font-weight:600;color:${diff > 0 ? '#e53935' : '#43a047'}">${diff > 0 ? '+' : ''}${fmt(diff)}</span>`
+                : `<span style="font-size:12px;color:var(--text-2)">—</span>`;
+              return `<div class="cat-bar-row">
+                <span class="cat-dot" style="background:${cat?.colour ?? '#ccc'}"></span>
+                <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}</span>
+                <span class="cat-bar-diff">${diffStr}</span>
+                <span class="cat-bar-amount">${fmt(total)}</span>
+              </div>`;
+            }).join('')}
+        ${catRows.length > 0 ? `
+          <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:13px">
+            <span style="font-weight:700">Total ${year}</span>
+            <span style="font-weight:700">${fmt(totalYearSpend)}</span>
+          </div>
+          <div style="text-align:right;font-size:12px;color:var(--text-2);margin-top:2px">${year - 1}: ${fmt(totalPrevSpend)} · diff: <span style="color:${totalYearSpend > totalPrevSpend ? '#e53935' : '#43a047'}">${totalYearSpend > totalPrevSpend ? '+' : ''}${fmt(totalYearSpend - totalPrevSpend)}</span></div>
+        ` : ''}
+      </div>
+
+      <!-- Variable spending by month: year vs prev year -->
+      <div class="analysis-section">
+        <div class="analysis-section-title">Variable spending — ${year} vs ${year - 1}</div>
+        <div class="chart-wrap"><canvas id="chart-yt-varspend"></canvas></div>
+      </div>
+
+      <!-- Top 5 spends -->
+      <div class="analysis-section">
+        <div class="analysis-section-title">Top spending groups — ${year}</div>
+        ${top5Spends.length === 0
+          ? '<div class="empty-state" style="padding:12px 0"><div class="empty-text">No spending data</div></div>'
+          : top5Spends.map(([name, d], i) => {
+              const cat = catMap[d.categoryId];
+              return `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;${i < top5Spends.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+                <div style="width:36px;height:36px;border-radius:50%;background:${cat?.colour ?? '#ccc'}22;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">${cat?.icon ?? '💸'}</div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}</div>
+                  <div style="font-size:12px;color:var(--text-2)">${d.count} transaction${d.count !== 1 ? 's' : ''}</div>
+                </div>
+                <div style="font-weight:700;color:var(--coral);font-size:15px">${fmt(d.total)}</div>
+              </div>`;
+            }).join('')}
+      </div>
+
+      <!-- Top 5 extra incomes -->
+      ${top5Incomes.length > 0 ? `
+      <div class="analysis-section" style="margin-bottom:80px">
+        <div class="analysis-section-title">Top extra incomes — ${year}</div>
+        ${top5Incomes.map(([name, d], i) => `
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;${i < top5Incomes.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+            <div style="width:36px;height:36px;border-radius:50%;background:#43a04722;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">💰</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}</div>
+              <div style="font-size:12px;color:var(--text-2)">${d.count} time${d.count !== 1 ? 's' : ''}</div>
+            </div>
+            <div style="font-weight:700;color:#43a047;font-size:15px">${fmt(d.total)}</div>
+          </div>`).join('')}
+      </div>
+      ` : '<div style="height:80px"></div>'}
+    </div>
+  `;
+
+  // Running savings line chart
+  new Chart(viewContainer.querySelector('#chart-yt-savings').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: monthlyData.map(m => m.label),
+      datasets: [{
+        data: monthlyData.map(m => m.cumulativeSaved),
+        borderColor: '#43a047',
+        backgroundColor: 'rgba(67,160,71,0.1)',
+        borderWidth: 2, fill: true, tension: 0.35, pointRadius: 4, pointBackgroundColor: '#43a047',
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtTip(ctx.parsed.y) } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+      },
+    },
+  });
+
+  // Monthly surplus/loss bar chart
+  new Chart(viewContainer.querySelector('#chart-yt-surplus').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: monthlyData.map(m => m.label),
+      datasets: [{
+        data: monthlyData.map(m => m.monthSaved),
+        backgroundColor: monthlyData.map(m => m.monthSaved >= 0 ? 'rgba(67,160,71,0.75)' : 'rgba(229,57,53,0.75)'),
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtTip(ctx.parsed.y) } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+      },
+    },
+  });
+
+  // Variable spending by month comparison chart
+  new Chart(viewContainer.querySelector('#chart-yt-varspend').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: varByMonth.map(m => m.label),
+      datasets: [
+        { label: String(year),     data: varByMonth.map(m => m.cur),  backgroundColor: 'rgba(26,115,232,0.8)',  borderRadius: 3 },
+        { label: String(year - 1), data: varByMonth.map(m => m.prev), backgroundColor: 'rgba(26,115,232,0.25)', borderRadius: 3 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${fmtTip(ctx.parsed.y)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+      },
+    },
+  });
+
+  viewContainer.querySelector('#yt-back').onclick = () => navigate('analysis');
+  viewContainer.querySelector('#yt-prev').onclick = () => { state.yearlyTrendsYear = year - 1; renderYearlyTrends(); };
+  viewContainer.querySelector('#yt-next')?.addEventListener('click', () => {
+    if (year < new Date().getFullYear()) { state.yearlyTrendsYear = year + 1; renderYearlyTrends(); }
   });
 }
 
@@ -2966,6 +3365,7 @@ async function renderSettings() {
         <div class="settings-card">
           <div class="settings-row" id="nav-recurring"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Recurring expenses</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big Expenses</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household Bills (Rich)</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -2991,7 +3391,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 16:00 BST (v31)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 17:30 BST (v32)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2999,6 +3399,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-extra-incomes').onclick = () => navigate('extraIncomes');
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
+  viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
