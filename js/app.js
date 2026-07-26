@@ -62,6 +62,7 @@ async function renderView(view) {
       case 'distributions':await renderDistributions(); break;
       case 'extraIncomes': await renderExtraIncomes(); break;
       case 'accounts':     await renderAccounts(); break;
+      case 'netWealth':    await renderNetWealth(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
       default:             await renderBalance();
@@ -104,9 +105,22 @@ async function renderBalance() {
 
   const pendingCount = await db.syncQueue.where('status').equals('pending').count();
 
+  // Bi-monthly net wealth prompt: even months where no snapshot exists this month
+  const todayMonth = today().slice(0, 7);
+  const todayMonthNum = new Date().getMonth() + 1;
+  const isEvenMonth = todayMonthNum % 2 === 0;
+  let wealthBanner = '';
+  if (isEvenMonth) {
+    const thisMonthSnapshots = await db.accountSnapshots.filter(s => s.date.startsWith(todayMonth)).count();
+    if (thisMonthSnapshots === 0) {
+      wealthBanner = `<div class="wealth-banner" id="wealth-banner-btn">📊 Time for your bi-monthly net wealth update — tap to enter</div>`;
+    }
+  }
+
   viewContainer.innerHTML = `
     <div class="balance-screen ${todayBal < 0 ? 'negative' : ''}">
       ${pendingCount > 0 ? `<div class="sync-banner">${pendingCount} change${pendingCount > 1 ? 's' : ''} pending sync</div>` : ''}
+      ${wealthBanner}
       <div class="balance-header">
         <button class="balance-menu-btn" id="balance-menu-btn">
           <svg width="22" height="16" viewBox="0 0 22 16" fill="none">
@@ -171,6 +185,7 @@ async function renderBalance() {
   viewContainer.querySelector('#fab-expense').onclick = () => openEntry('expense');
   viewContainer.querySelector('#balance-menu-btn').onclick = () => navigate('settings');
   viewContainer.querySelector('#balance-cycle-btn').onclick = () => navigate('breakdown');
+  viewContainer.querySelector('#wealth-banner-btn')?.onclick = () => { navigate('netWealth'); };
 }
 
 async function openEntry(type, existingTxn = null) {
@@ -209,7 +224,7 @@ async function openEntry(type, existingTxn = null) {
           <span class="entry-field-icon">🏷️</span>
           <label>Category</label>
           <div id="cat-preview" style="flex:1;font-size:15px;color:var(--text)">
-            ${hasCategory ? `<span style="margin-right:4px">${selectedCat.icon}</span>${selectedCat.name}` : '<span style="color:var(--text-2)">None</span>'}
+            ${hasCategory ? `<span style="margin-right:4px">${selectedCat.icon}</span>${selectedCat.name}` : `<span style="color:var(--text-2)">${type === 'expense' ? 'Misc (auto)' : 'Select…'}</span>`}
           </div>
           <span style="color:var(--text-2);font-size:18px">›</span>
         </div>
@@ -247,7 +262,7 @@ async function openEntry(type, existingTxn = null) {
       state.entryCategory = catId;
       overlay.querySelector('#cat-preview').innerHTML = catId
         ? `<span style="margin-right:4px">${catIcon}</span>${catName}`
-        : '<span style="color:var(--text-2)">None</span>';
+        : `<span style="color:var(--text-2)">Misc (auto)</span>`;
       setupNoteAutocomplete(overlay);
     });
   };
@@ -409,10 +424,6 @@ function openCategoryPicker(cats, currentCatId, onSelect) {
       </div>
       <div class="sheet-body" style="padding:12px;overflow-y:auto">
         <div class="cat-grid" style="display:grid">
-          <div class="cat-item ${!currentCatId ? 'selected' : ''}" data-cat="" data-cat-name="" data-cat-icon="">
-            <div class="cat-icon" style="background:#f0f0f0;color:#999">✕</div>
-            <div class="cat-name">None</div>
-          </div>
           ${cats.map(c => `
             <div class="cat-item ${currentCatId === c.id ? 'selected' : ''}"
                  data-cat="${c.id}" data-cat-name="${c.name}" data-cat-icon="${c.icon}">
@@ -993,7 +1004,7 @@ async function renderAnalysis() {
   let dCur = cycle.start;
   while (dCur <= cutoffDate) { days.push(dCur); dCur = addDays(dCur, 1); }
 
-  const dailyAllowance = await calcDailyAllowance(cycle.start);
+  const { dailyAllowance } = await calcDailyAllowance(cycle.start, cycle.end);
   const dailyByDate = {};
   for (const t of cycleTxns) {
     if (!dailyByDate[t.date]) dailyByDate[t.date] = 0;
@@ -1631,6 +1642,358 @@ async function openSavingsSheet() {
   delegate(overlay, 'click', '[data-sav-idx]', (e, el) => openEditor(targets[Number(el.dataset.savIdx)]));
 }
 
+// ── Net Wealth ────────────────────────────────────────────────────────────────
+
+function wealthGroupForAccount(acc) {
+  return ['bank', 'credit', 'savings', 'holding'].includes(acc.type) ? 'cash' : 'other';
+}
+
+async function renderNetWealth() {
+  const [accounts, allSnapshots, inflationRate, inflationOverridesRaw] = await Promise.all([
+    db.accounts.orderBy('sortOrder').toArray(),
+    db.accountSnapshots.toArray(),
+    getSetting('inflationRate'),
+    getSetting('inflationOverrides'),
+  ]);
+
+  const activeAccounts = accounts.filter(a => a.isActive !== false);
+  const cashAccs = activeAccounts.filter(a => wealthGroupForAccount(a) === 'cash');
+  const otherAccs = activeAccounts.filter(a => wealthGroupForAccount(a) === 'other');
+
+  // Group snapshots by date
+  const snapshotMap = {}; // { date: { accountId: balance } }
+  for (const s of allSnapshots) {
+    if (!snapshotMap[s.date]) snapshotMap[s.date] = {};
+    snapshotMap[s.date][s.accountId] = s.balance ?? 0;
+  }
+  const dates = Object.keys(snapshotMap).sort().reverse(); // newest first
+
+  const rate = inflationRate ?? 3;
+  const inflationOverrides = inflationOverridesRaw ? JSON.parse(inflationOverridesRaw) : {};
+  const sortedDatesAsc = [...dates].reverse();
+  const firstDate = sortedDatesAsc[0];
+
+  // Compute net wealth per date and inflation baseline
+  const netByDate = {};
+  for (const d of dates) {
+    const vals = snapshotMap[d];
+    netByDate[d] = activeAccounts.reduce((s, a) => s + (vals[a.id] ?? 0), 0);
+  }
+  const baseNetWealth = firstDate ? netByDate[firstDate] : 0;
+
+  function inflationValue(dateStr) {
+    if (inflationOverrides[dateStr] != null) return inflationOverrides[dateStr];
+    if (!firstDate) return 0;
+    const years = diffDays(firstDate, dateStr) / 365;
+    return baseNetWealth * Math.pow(1 + rate / 100, years);
+  }
+
+  // Find most recent October for "change" calculation
+  const lastOctDate = sortedDatesAsc.filter(d => d.slice(5, 7) === '10').pop();
+  const lastOctNet = lastOctDate ? netByDate[lastOctDate] : null;
+
+  const fmt2 = v => {
+    const abs = Math.abs(v);
+    const str = abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : abs.toFixed(0);
+    return `${v < 0 ? '-' : ''}£${str}`;
+  };
+
+  function cellVal(accId, date) {
+    const v = snapshotMap[date]?.[accId];
+    return v != null ? fmt2(v) : '—';
+  }
+
+  const colStyle = 'min-width:80px;text-align:right;padding:5px 8px;font-size:12px;white-space:nowrap;';
+  const headerColStyle = colStyle + 'font-weight:600;color:var(--text-2);font-size:11px;';
+  const labelStyle = 'position:sticky;left:0;background:var(--card);z-index:1;min-width:130px;padding:5px 8px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+  const groupHeaderStyle = labelStyle + 'font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-2);background:var(--bg);padding-top:10px;';
+  const totalStyle = labelStyle + 'font-weight:700;border-top:1.5px solid var(--border);';
+  const totalCellStyle = colStyle + 'font-weight:700;border-top:1.5px solid var(--border);';
+  const wealthStyle = labelStyle + 'font-weight:800;font-size:13px;';
+  const wealthCellStyle = colStyle + 'font-weight:800;font-size:13px;';
+
+  function accRows(accs) {
+    return accs.map(a => `
+      <tr>
+        <td style="${labelStyle}">${a.name}</td>
+        ${dates.map(d => `<td style="${colStyle}">${cellVal(a.id, d)}</td>`).join('')}
+      </tr>
+    `).join('');
+  }
+
+  function groupTotal(accs, date) {
+    return accs.reduce((s, a) => s + (snapshotMap[date]?.[a.id] ?? 0), 0);
+  }
+
+  const tableHTML = dates.length === 0 ? '' : `
+    <div style="overflow-x:auto;margin:0 -1px">
+      <table style="border-collapse:collapse;width:max-content;min-width:100%">
+        <thead>
+          <tr>
+            <th style="${groupHeaderStyle}"></th>
+            ${dates.map(d => `<th style="${headerColStyle}">${new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' })}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="${groupHeaderStyle}" colspan="${dates.length + 1}">Cash</td></tr>
+          ${accRows(cashAccs)}
+          <tr>
+            <td style="${totalStyle}">Cash total</td>
+            ${dates.map(d => `<td style="${totalCellStyle}">${fmt2(groupTotal(cashAccs, d))}</td>`).join('')}
+          </tr>
+          <tr><td style="${groupHeaderStyle}" colspan="${dates.length + 1}">Assets &amp; Debts</td></tr>
+          ${accRows(otherAccs)}
+          <tr>
+            <td style="${totalStyle}">Assets &amp; Debts total</td>
+            ${dates.map(d => `<td style="${totalCellStyle}">${fmt2(groupTotal(otherAccs, d))}</td>`).join('')}
+          </tr>
+          <tr>
+            <td style="${wealthStyle}">Net Wealth</td>
+            ${dates.map(d => `<td style="${wealthCellStyle}">${fmt2(netByDate[d])}</td>`).join('')}
+          </tr>
+          <tr>
+            <td style="${labelStyle}">Change (vs last Oct)</td>
+            ${dates.map(d => {
+              if (!lastOctNet || d === lastOctDate) return `<td style="${colStyle}">—</td>`;
+              const chg = netByDate[d] - lastOctNet;
+              return `<td style="${colStyle};color:${chg >= 0 ? '#43a047' : '#e53935'}">${chg >= 0 ? '+' : ''}${fmt2(chg)}</td>`;
+            }).join('')}
+          </tr>
+          <tr>
+            <td style="${labelStyle};color:var(--text-2)">Inflation tracker</td>
+            ${dates.map(d => `<td style="${colStyle};color:var(--text-2)">${fmt2(inflationValue(d))}</td>`).join('')}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  // Chart data (ascending)
+  const chartDates = sortedDatesAsc;
+  const chartLabels = chartDates.map(d => new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }));
+  const chartNetWealth = chartDates.map(d => netByDate[d]);
+  const chartInflation = chartDates.map(d => inflationValue(d));
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.navigate('settings')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="screen-title">Net Wealth</span>
+        <button class="icon-btn" id="nw-add-btn">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+
+      ${dates.length === 0 ? `
+        <div class="empty-state"><div class="empty-icon">📊</div>
+          <div class="empty-title">No snapshots yet</div>
+          <div class="empty-text">Record your net wealth bi-monthly to track progress over time.</div>
+          <button class="btn btn-primary" id="nw-empty-add">Add first snapshot</button>
+        </div>
+      ` : `
+        <div class="analysis-section" style="margin:10px 12px">
+          <div class="analysis-section-title">Net Wealth over time</div>
+          <div class="chart-wrap"><canvas id="chart-nw"></canvas></div>
+        </div>
+        <div class="settings-card" style="margin:10px 12px;border-radius:var(--radius);overflow:visible">
+          ${tableHTML}
+        </div>
+        <div style="padding:8px 12px 4px;display:flex;gap:8px;flex-wrap:wrap">
+          ${dates.map(d => `<button class="pill-btn" data-edit-date="${d}">${new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}</button>`).join('')}
+        </div>
+      `}
+
+      <div class="settings-section" style="margin-top:12px">
+        <div class="settings-section-title">Inflation settings</div>
+        <div class="settings-card">
+          <div class="settings-row" style="cursor:pointer" id="nw-inflation-rate-row">
+            <span class="settings-row-icon">📈</span>
+            <span class="settings-row-label">Annual inflation rate</span>
+            <span style="margin-left:auto;color:var(--text-2);font-size:14px">${rate}%</span>
+            <span class="settings-row-chevron">›</span>
+          </div>
+          ${firstDate && dates.length > 0 ? `<div class="settings-row" style="cursor:pointer" id="nw-inflation-override-row">
+            <span class="settings-row-icon">✏️</span>
+            <span class="settings-row-label">Override inflation values</span>
+            <span class="settings-row-chevron">›</span>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <div style="padding-bottom:80px"></div>
+    </div>
+  `;
+
+  viewContainer.querySelector('#nw-add-btn')?.addEventListener('click', () => openWealthSnapshotEditor(null));
+  viewContainer.querySelector('#nw-empty-add')?.addEventListener('click', () => openWealthSnapshotEditor(null));
+
+  delegate(viewContainer.querySelector('.settings-screen'), 'click', '[data-edit-date]', (e, el) => {
+    openWealthSnapshotEditor(el.dataset.editDate);
+  });
+
+  viewContainer.querySelector('#nw-inflation-rate-row')?.addEventListener('click', async () => {
+    const val = prompt(`Annual inflation rate (%):\n(Current: ${rate}%)`, rate);
+    if (val === null) return;
+    const num = parseFloat(val);
+    if (isNaN(num) || num < 0 || num > 50) { showToast('Invalid rate'); return; }
+    await setSetting('inflationRate', num);
+    renderNetWealth();
+  });
+
+  viewContainer.querySelector('#nw-inflation-override-row')?.addEventListener('click', () => {
+    openInflationOverrideEditor(dates, inflationValue, inflationOverrides);
+  });
+
+  if (dates.length > 1) {
+    const maxVal = Math.max(...chartNetWealth, ...chartInflation);
+    const minVal = Math.min(...chartNetWealth, ...chartInflation);
+    const pad = (maxVal - minVal) * 0.1;
+    const yTick = v => Math.abs(v) >= 1000 ? `£${(v/1000).toFixed(0)}k` : `£${v.toFixed(0)}`;
+
+    new Chart(viewContainer.querySelector('#chart-nw').getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: chartLabels,
+        datasets: [
+          { label: 'Net Wealth', data: chartNetWealth, borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.1)', borderWidth: 2.5, fill: true, tension: 0.3, pointRadius: 3 },
+          { label: 'Inflation', data: chartInflation, borderColor: '#e53935', borderDash: [5, 4], borderWidth: 1.5, fill: false, tension: 0.3, pointRadius: 0 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 14 } } },
+        scales: {
+          x: { grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+          y: { min: minVal - pad, max: maxVal + pad, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+        },
+      },
+    });
+  }
+}
+
+async function openWealthSnapshotEditor(existingDate) {
+  const accounts = await db.accounts.orderBy('sortOrder').toArray();
+  const activeAccounts = accounts.filter(a => a.isActive !== false);
+  const cashAccs = activeAccounts.filter(a => wealthGroupForAccount(a) === 'cash');
+  const otherAccs = activeAccounts.filter(a => wealthGroupForAccount(a) === 'other');
+
+  const snapshotDate = existingDate ?? today().slice(0, 7) + '-01';
+  const existing = {};
+  if (existingDate) {
+    const rows = await db.accountSnapshots.filter(s => s.date === existingDate).toArray();
+    rows.forEach(r => { existing[r.accountId] = r.balance ?? 0; });
+  }
+
+  function accInputRow(a) {
+    const val = existing[a.id] ?? '';
+    const isDebt = ['credit', 'mortgage', 'loan'].includes(a.type);
+    return `<div class="settings-row" style="gap:12px;align-items:center">
+      <span style="flex:1;font-size:14px">${a.name}${isDebt ? ' <span style="font-size:11px;color:var(--text-2)">(debt)</span>' : ''}</span>
+      <input type="number" step="0.01" class="form-input" style="width:110px;text-align:right" data-acc-id="${a.id}" value="${val}" placeholder="0">
+    </div>`;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:90vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existingDate ? 'Edit' : 'New'} Snapshot</span>
+        <button class="sheet-close" id="nw-e-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(90vh - 60px)">
+        <div class="form-group">
+          <label class="form-label">Snapshot date (1st of the month)</label>
+          <input class="form-input" id="nw-e-date" type="date" value="${snapshotDate}">
+        </div>
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-2);padding:10px 0 4px">Cash accounts</div>
+        <div class="settings-card" style="margin-bottom:12px">${cashAccs.map(accInputRow).join('')}</div>
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-2);padding:4px 0">Assets &amp; Debts</div>
+        <div style="font-size:12px;color:var(--text-2);padding-bottom:6px">Enter debts (credit cards, mortgage, loan) as negative numbers.</div>
+        <div class="settings-card" style="margin-bottom:20px">${otherAccs.map(accInputRow).join('')}</div>
+        <div style="display:flex;gap:8px;padding-bottom:20px">
+          ${existingDate ? `<button class="btn btn-danger" id="nw-e-del">Delete</button>` : ''}
+          <button class="btn btn-primary" id="nw-e-save" style="flex:1">Save Snapshot</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#nw-e-close').onclick = () => overlay.remove();
+
+  if (existingDate) {
+    overlay.querySelector('#nw-e-del').onclick = async () => {
+      if (!confirm(`Delete snapshot for ${existingDate}?`)) return;
+      await db.accountSnapshots.filter(s => s.date === existingDate).delete();
+      overlay.remove();
+      renderNetWealth();
+      showToast('Snapshot deleted');
+    };
+  }
+
+  overlay.querySelector('#nw-e-save').onclick = async () => {
+    const date = overlay.querySelector('#nw-e-date').value;
+    if (!date) { showToast('Enter a date'); return; }
+    const inputs = overlay.querySelectorAll('[data-acc-id]');
+    // Delete existing records for this date
+    await db.accountSnapshots.filter(s => s.date === date).delete();
+    const records = [];
+    for (const inp of inputs) {
+      const accId = Number(inp.dataset.accId);
+      const balance = parseFloat(inp.value) || 0;
+      records.push({ accountId: accId, date, balance });
+    }
+    const ids = await db.accountSnapshots.bulkAdd(records, { allKeys: true });
+    ids.forEach((id, i) => queueWrite('accountSnapshots', id).catch(() => {}));
+    overlay.remove();
+    renderNetWealth();
+    showToast('Snapshot saved');
+  };
+}
+
+async function openInflationOverrideEditor(dates, computedInflation, currentOverrides) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:85vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Inflation values</span>
+        <button class="sheet-close" id="inf-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(85vh - 60px)">
+        <div style="font-size:13px;color:var(--text-2);margin-bottom:12px;line-height:1.5">Override auto-calculated inflation for specific dates. Leave blank to use computed value.</div>
+        ${[...dates].reverse().map(d => {
+          const computed = computedInflation(d).toFixed(0);
+          const override = currentOverrides[d];
+          return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="flex:1;font-size:13px">${new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}</span>
+            <input type="number" step="1" class="form-input inf-override" style="width:110px;text-align:right" data-date="${d}" value="${override ?? ''}" placeholder="${computed}">
+          </div>`;
+        }).join('')}
+        <button class="btn btn-primary btn-full" id="inf-save" style="margin-top:8px;padding-bottom:12px">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#inf-close').onclick = () => overlay.remove();
+  overlay.querySelector('#inf-save').onclick = async () => {
+    const overrides = {};
+    overlay.querySelectorAll('.inf-override').forEach(inp => {
+      if (inp.value.trim() !== '') overrides[inp.dataset.date] = parseFloat(inp.value);
+    });
+    await setSetting('inflationOverrides', JSON.stringify(overrides));
+    overlay.remove();
+    renderNetWealth();
+    showToast('Inflation values saved');
+  };
+}
+
 async function renderSettings() {
   const activeSavings = await getSavingsTarget();
   const user = state.currentUser;
@@ -1696,6 +2059,12 @@ async function renderSettings() {
         </div>
       </div>
       <div class="settings-section">
+        <div class="settings-section-title">Wealth</div>
+        <div class="settings-card">
+          <div class="settings-row" id="nav-net-wealth"><span class="settings-row-icon">📊</span><span class="settings-row-label">Net wealth tracker</span><span class="settings-row-chevron">›</span></div>
+        </div>
+      </div>
+      <div class="settings-section">
         <div class="settings-section-title">Data</div>
         <div class="settings-card">
           <div class="settings-row" id="nav-import"><span class="settings-row-icon">📥</span><span class="settings-row-label">Import data</span><span class="settings-row-chevron">›</span></div>
@@ -1704,7 +2073,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 21:30 (v16)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 22:15 (v17)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -1712,6 +2081,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-extra-incomes').onclick = () => navigate('extraIncomes');
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
+  viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
   viewContainer.querySelector('#clear-btn').onclick = async () => {
