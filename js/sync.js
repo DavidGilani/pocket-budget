@@ -163,7 +163,7 @@ export async function pullFromFirestore(fullPull = false) {
 
 // ── Upload all local data to Firestore ────────────────────────────────────────
 export async function uploadAllToFirestore(onProgress) {
-  if (!auth.currentUser) return;
+  if (!auth.currentUser) throw new Error('Not signed in');
   const uid = auth.currentUser.uid;
   const allTables = [...TABLES, 'settings'];
 
@@ -172,30 +172,40 @@ export async function uploadAllToFirestore(onProgress) {
   for (const t of allTables) total += await db[t].count();
   onProgress?.(0, total);
 
+  const failed = [];
   for (const tableName of allTables) {
-    const records = await db[tableName].toArray();
-    for (let i = 0; i < records.length; i += 500) {
-      const chunk = records.slice(i, i + 500);
-      const batch = writeBatch(firestore);
-      for (const record of chunk) {
-        const id = tableName === 'settings' ? record.key : String(record.id);
-        batch.set(doc(firestore, 'users', uid, tableName, id), {
-          ...record, _updatedAt: serverTimestamp(),
-        });
+    try {
+      const records = await db[tableName].toArray();
+      for (let i = 0; i < records.length; i += 500) {
+        const chunk = records.slice(i, i + 500);
+        const batch = writeBatch(firestore);
+        for (const record of chunk) {
+          const id = tableName === 'settings' ? record.key : String(record.id);
+          batch.set(doc(firestore, 'users', uid, tableName, id), {
+            ...record, _updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+        done += chunk.length;
+        onProgress?.(done, total);
       }
-      await batch.commit();
-      done += chunk.length;
-      onProgress?.(done, total);
+    } catch (e) {
+      failed.push(tableName);
+      console.warn('uploadAllToFirestore failed for', tableName, e);
     }
   }
 
-  // Clear sync queue since everything is now uploaded
-  await db.syncQueue.clear();
+  // Finalise regardless of partial failure
+  try {
+    await db.syncQueue.clear();
+    await setDoc(doc(firestore, 'users', uid), { initializedAt: serverTimestamp() }, { merge: true });
+    await setSetting('lastSyncAt', Date.now());
+    await setSetting('firestoreUid', uid);
+  } catch (e) {
+    console.warn('uploadAllToFirestore finalization failed', e);
+  }
 
-  // Sentinel so other devices know Firestore is populated
-  await setDoc(doc(firestore, 'users', uid), { initializedAt: serverTimestamp() }, { merge: true });
-  await setSetting('lastSyncAt', Date.now());
-  await setSetting('firestoreUid', uid);
+  if (failed.length > 0) throw new Error(`Failed tables: ${failed.join(', ')}`);
 }
 
 async function isFirestoreInitialized() {

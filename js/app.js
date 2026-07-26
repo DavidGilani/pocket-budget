@@ -2904,11 +2904,12 @@ async function renderSettings() {
         <div class="settings-card">
           <div class="settings-row" id="nav-import"><span class="settings-row-icon">📥</span><span class="settings-row-label">Import data</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="export-btn"><span class="settings-row-icon">📤</span><span class="settings-row-label">Export data (JSON)</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="diag-btn"><span class="settings-row-icon">🔍</span><span class="settings-row-label">Diagnostics</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="clear-btn" style="color:var(--red)"><span class="settings-row-icon">🗑️</span><span class="settings-row-label" style="color:var(--red)">Clear all data</span></div>
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 13:07 BST (v28)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 14:30 BST (v29)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2939,10 +2940,46 @@ async function renderSettings() {
   const forceUploadBtn = viewContainer.querySelector('#force-upload-btn');
   if (forceUploadBtn) forceUploadBtn.onclick = async () => {
     if (!confirm('This will overwrite cloud data with everything on this device. Use this on the device that has the most complete data. Continue?')) return;
+    if (!auth.currentUser) { showToast('Not signed in — please sign in first'); return; }
     showToast('Uploading all data…');
-    await uploadAllToFirestore();
-    showToast('Upload complete — sync on other devices now');
+    try {
+      await uploadAllToFirestore();
+      showToast('Upload complete — sync on other devices now');
+    } catch (e) {
+      showToast('Upload failed: ' + e.message);
+      console.error('Force upload error:', e);
+    }
     renderSettings();
+  };
+  const diagBtn = viewContainer.querySelector('#diag-btn');
+  if (diagBtn) diagBtn.onclick = async () => {
+    const uid = auth.currentUser?.uid ?? 'Not signed in';
+    const tableNames = ['transactions', 'categories', 'recurringIncome', 'recurringExpenses',
+      'savingsTargets', 'distributions', 'accounts', 'accountSnapshots',
+      'friendHoldings', 'friendTransactions', 'settings'];
+    const counts = {};
+    for (const t of tableNames) counts[t] = await db[t].count();
+    const pending = await getPendingSyncCount();
+    const overlay = document.createElement('div');
+    overlay.className = 'sheet-overlay';
+    overlay.innerHTML = `
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header"><span class="screen-title">Diagnostics</span></div>
+        <div class="sheet-body" style="padding:16px">
+          <div style="font-size:12px;font-family:monospace;background:var(--bg);padding:12px;border-radius:8px;margin-bottom:12px;word-break:break-all;line-height:1.8">
+            <div><strong>Auth UID:</strong> ${uid}</div>
+            <div style="margin-top:8px"><strong>Local record counts:</strong></div>
+            ${Object.entries(counts).map(([t, n]) => `<div style="padding-left:8px">${t}: ${n}</div>`).join('')}
+            <div style="margin-top:8px"><strong>Sync queue pending:</strong> ${pending}</div>
+          </div>
+          <button class="btn btn-primary" id="diag-close" style="width:100%">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    overlay.querySelector('#diag-close').onclick = () => overlay.remove();
   };
   const signOutBtn = viewContainer.querySelector('#sign-out-btn');
   if (signOutBtn) signOutBtn.onclick = async () => { await signOutUser(); renderSettings(); };
