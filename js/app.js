@@ -2404,8 +2404,14 @@ async function renderBankGilulu(activeHoldingId = null) {
   const principalTotal = allTxs.reduce((s, t) => s + t.amount, 0);
   const interestEarned = totalWithInterest - principalTotal;
 
-  // This-year interest: accrued from Feb 1 of current year
   const feb1 = `${new Date().getFullYear()}-02-01`;
+
+  // Deposited this year: net of deposits/withdrawals since Feb 1
+  const depositedThisYear = allTxs
+    .filter(t => t.date >= feb1)
+    .reduce((s, t) => s + t.amount, 0);
+
+  // This-year interest: accrued from Feb 1 of current year
   const thisYearInterest = allTxs.reduce((sum, t) => {
     const effectiveStart = t.date > feb1 ? t.date : feb1;
     if (effectiveStart >= toDate) return sum;
@@ -2496,11 +2502,11 @@ async function renderBankGilulu(activeHoldingId = null) {
           </div>
           <div style="display:flex;gap:12px;margin-top:14px">
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Principal</div>
-              <div style="font-size:14px;font-weight:700">${bgFmt(principalTotal)}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">${holding?.name === 'Domsey' ? 'Deposited this year' : 'Net deposits'}</div>
+              <div style="font-size:14px;font-weight:700">${bgFmt(holding?.name === 'Domsey' ? depositedThisYear : principalTotal)}</div>
             </div>
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">This year (Feb 1)</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">This year's interest</div>
               <div style="font-size:14px;font-weight:700;color:#43a047">+${bgFmt(thisYearInterest)}</div>
             </div>
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
@@ -2590,7 +2596,7 @@ async function renderBankGilulu(activeHoldingId = null) {
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '£' + ctx.parsed.y.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) } } },
         scales: {
           x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
           y: { ticks: { font: { size: 10 }, callback: v => bgFmt(v), stepSize: step }, grid: { color: 'rgba(0,0,0,.06)' } },
@@ -2675,14 +2681,14 @@ function openBgTxEditor(existing, holdingId, onDone) {
         <div id="bgte-amount-display" style="font-size:36px;font-weight:800;text-align:center;padding:8px 0;color:${negative ? 'var(--coral)' : '#43a047'}">
           ${!negative ? '+' : ''}${bgFmt(getAmount())}
         </div>
-        <div style="font-size:11px;color:var(--text-2);text-align:center;margin-bottom:12px">Positive = deposit · Negative = withdrawal</div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
-          ${[1,2,3,4,5,6,7,8,9].map(n => `<button class="numpad-key" data-n="${n}">${n}</button>`).join('')}
-          <button class="numpad-key" id="bgte-toggle" style="font-size:15px">±</button>
-          <button class="numpad-key" data-n="0">0</button>
-          <button class="numpad-key delete" id="bgte-del-key">⌫</button>
+        <div style="font-size:11px;color:var(--text-2);text-align:center;margin-bottom:8px">Positive = deposit · Negative = withdrawal</div>
+        <div style="padding:0 0 6px;text-align:center">
+          <button id="bgte-toggle" style="font-size:12px;padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);background:transparent;color:var(--text-2);cursor:pointer">+/− toggle</button>
         </div>
-        ${!isNew ? `<button class="btn btn-danger" id="bgte-del-tx" style="width:100%;margin-top:4px;margin-bottom:20px">Delete transaction</button>` : '<div style="height:20px"></div>'}
+        <div class="numpad" style="margin:0 -16px">
+          ${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k => `<button class="numpad-key${k==='⌫'?' delete':''}" data-key="${k}">${k}</button>`).join('')}
+        </div>
+        ${!isNew ? `<button class="btn btn-danger" id="bgte-del-tx" style="width:100%;margin-top:8px;margin-bottom:12px">Delete transaction</button>` : '<div style="height:12px"></div>'}
       </div>
     </div>
   `;
@@ -2720,11 +2726,15 @@ function openBgTxEditor(existing, holdingId, onDone) {
     currentDate = overlay.querySelector('#bgte-date').value;
     if (getAmount() !== 0) doSave();
   });
-  overlay.querySelectorAll('[data-n]').forEach(btn => {
-    btn.addEventListener('click', () => { pence = pence * 10 + Number(btn.dataset.n); refreshDisplay(); });
+  overlay.querySelectorAll('[data-key]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const k = btn.dataset.key;
+      if (k === '⌫') { pence = Math.floor(pence / 10); }
+      else if (k !== '.') { pence = pence * 10 + Number(k); }
+      refreshDisplay();
+    });
   });
   overlay.querySelector('#bgte-toggle').addEventListener('click', () => { negative = !negative; refreshDisplay(); });
-  overlay.querySelector('#bgte-del-key').addEventListener('click', () => { pence = Math.floor(pence / 10); refreshDisplay(); });
   overlay.querySelector('#bgte-del-tx')?.addEventListener('click', async () => {
     if (!confirm('Delete this transaction?')) return;
     await db.friendTransactions.delete(existing.id);
@@ -2887,7 +2897,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 12:19 BST (v24)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 12:53 BST (v27)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
