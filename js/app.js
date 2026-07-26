@@ -2513,7 +2513,7 @@ async function renderBankGilulu(activeHoldingId = null) {
         ${allTxs.length > 0 ? `
         <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);padding:14px 12px">
           <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.4px;margin-bottom:10px">BALANCE OVER TIME</div>
-          <canvas id="bg-chart" height="160"></canvas>
+          <div style="position:relative;height:160px"><canvas id="bg-chart"></canvas></div>
         </div>
         ` : ''}
 
@@ -2877,7 +2877,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 02:00 (v23)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 (v24)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
