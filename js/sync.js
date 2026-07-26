@@ -26,9 +26,57 @@ function docRef(tableName, id) {
   return doc(firestore, 'users', auth.currentUser.uid, tableName, String(id));
 }
 
+// ── Local sync queue (for writes that happen before auth is ready) ─────────────
+async function enqueue(action, tableName, recordId) {
+  try {
+    await db.syncQueue.add({ tableName, recordId: String(recordId), action, status: 'pending' });
+  } catch (e) {
+    console.debug('enqueue failed:', e.message);
+  }
+}
+
+export async function getPendingSyncCount() {
+  return db.syncQueue.where('status').equals('pending').count();
+}
+
+export async function flushSyncQueue() {
+  if (!auth.currentUser) return 0;
+  const pending = await db.syncQueue.where('status').equals('pending').toArray();
+  if (pending.length === 0) return 0;
+
+  let flushed = 0;
+  for (const item of pending) {
+    try {
+      if (item.action === 'write') {
+        let record;
+        if (item.tableName === 'settings') {
+          record = await db.settings.get(item.recordId);
+        } else {
+          record = await db[item.tableName].get(Number(item.recordId));
+        }
+        if (record) {
+          await setDoc(docRef(item.tableName, item.recordId), { ...record, _updatedAt: serverTimestamp() });
+        }
+      } else if (item.action === 'delete') {
+        await setDoc(docRef(item.tableName, item.recordId), { _deleted: true, _updatedAt: serverTimestamp() });
+      }
+      await db.syncQueue.delete(item.id);
+      flushed++;
+    } catch (e) {
+      console.debug('flushSyncQueue item failed, will retry next sync:', item.tableName, item.recordId, e.message);
+    }
+  }
+  if (flushed > 0) notify();
+  return flushed;
+}
+
 // ── Write/Delete a single record to Firestore ─────────────────────────────────
 export async function queueWrite(tableName, id) {
-  if (!auth.currentUser) return;
+  if (!auth.currentUser) {
+    // Auth not ready yet — persist locally and flush when auth is restored
+    await enqueue('write', tableName, id);
+    return;
+  }
   try {
     let record;
     if (tableName === 'settings') {
@@ -39,18 +87,23 @@ export async function queueWrite(tableName, id) {
     if (!record) return;
     await setDoc(docRef(tableName, id), { ...record, _updatedAt: serverTimestamp() });
   } catch (e) {
-    // Firestore offline persistence will retry automatically
-    console.debug('queueWrite offline, will retry:', tableName, id);
+    // Network error — queue for retry
+    await enqueue('write', tableName, id);
+    console.debug('queueWrite failed, queued for retry:', tableName, id, e.message);
   }
   notify();
 }
 
 export async function queueDelete(tableName, id) {
-  if (!auth.currentUser) return;
+  if (!auth.currentUser) {
+    await enqueue('delete', tableName, id);
+    return;
+  }
   try {
     await setDoc(docRef(tableName, id), { _deleted: true, _updatedAt: serverTimestamp() });
   } catch (e) {
-    console.debug('queueDelete offline, will retry:', tableName, id);
+    await enqueue('delete', tableName, id);
+    console.debug('queueDelete failed, queued for retry:', tableName, id, e.message);
   }
   notify();
 }
@@ -108,7 +161,7 @@ export async function pullFromFirestore(fullPull = false) {
   return pulled;
 }
 
-// ── Upload all local data to Firestore (first device) ─────────────────────────
+// ── Upload all local data to Firestore ────────────────────────────────────────
 export async function uploadAllToFirestore(onProgress) {
   if (!auth.currentUser) return;
   const uid = auth.currentUser.uid;
@@ -136,6 +189,9 @@ export async function uploadAllToFirestore(onProgress) {
     }
   }
 
+  // Clear sync queue since everything is now uploaded
+  await db.syncQueue.clear();
+
   // Sentinel so other devices know Firestore is populated
   await setDoc(doc(firestore, 'users', uid), { initializedAt: serverTimestamp() }, { merge: true });
   await setSetting('lastSyncAt', Date.now());
@@ -161,7 +217,6 @@ export function initSync(onAuthStateChange) {
     notify();
 
     try {
-      // Complete any pending redirect sign-in
       const savedUid = await getSetting('firestoreUid');
 
       if (savedUid !== user.uid) {
@@ -175,8 +230,9 @@ export function initSync(onAuthStateChange) {
         }
         await setSetting('firestoreUid', user.uid);
       } else {
-        // Returning device — delta sync
+        // Returning device — pull remote changes, then push any locally queued writes
         await pullFromFirestore();
+        await flushSyncQueue();
       }
     } catch (e) {
       syncState = { active: false, error: e.message };

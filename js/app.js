@@ -4,7 +4,7 @@ import { db, initDB, getSetting, setSetting } from './db.js';
 import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays, cycleForDate, monthlyEquivalent, dailyEquivalent, delegate } from './utils.js';
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
 import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
-import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore } from './sync.js';
+import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount } from './sync.js';
 
 const state = {
   view: 'balance',
@@ -2822,6 +2822,7 @@ async function renderSettings() {
   const user = state.currentUser;
   const ss = syncState;
   const lastSync = await getSetting('lastSyncAt');
+  const pendingCount = await getPendingSyncCount();
   const syncAgo = lastSync ? (() => {
     const diff = Math.round((Date.now() - lastSync) / 60000);
     if (diff < 1) return 'just now';
@@ -2844,8 +2845,18 @@ async function renderSettings() {
               ss.error ? `<span class="sync-chip sync-error">Error</span>` :
               syncAgo ? `<span class="sync-chip sync-ok">Synced ${syncAgo}</span>` : ''}
           </div>
-          <div class="settings-row" id="sync-now-btn"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Sync now</span></div>
-          <div class="settings-row" id="force-upload-btn"><span class="settings-row-icon">⬆️</span><span class="settings-row-label">Force re-upload all to cloud</span></div>
+          <div class="settings-row" id="sync-now-btn">
+            <span class="settings-row-icon">🔄</span>
+            <span class="settings-row-label">Sync now</span>
+            ${pendingCount > 0 ? `<span style="margin-left:auto;background:#ea4335;color:#fff;font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px">${pendingCount} pending</span>` : ''}
+          </div>
+          <div class="settings-row" id="force-upload-btn">
+            <span class="settings-row-icon">⬆️</span>
+            <div style="flex:1">
+              <div class="settings-row-label">Force re-upload from this device</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Overwrites cloud with this device's data. Only use on the device with the correct data.</div>
+            </div>
+          </div>
           <div class="settings-row" id="sign-out-btn" style="color:var(--red)"><span class="settings-row-icon">👋</span><span class="settings-row-label" style="color:var(--red)">Sign out</span></div>
         ` : `
           <div style="padding:4px 0 12px;font-size:13px;color:var(--text-2);line-height:1.6">Sign in to sync your data across devices automatically.</div>
@@ -2897,7 +2908,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 12:53 BST (v27)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 13:07 BST (v28)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2918,7 +2929,13 @@ async function renderSettings() {
   const signinBtn = viewContainer.querySelector('#google-signin-btn');
   if (signinBtn) signinBtn.onclick = async () => { try { await signInWithGoogle(); } catch (e) { showToast('Sign-in failed: ' + e.message); } };
   const syncNowBtn = viewContainer.querySelector('#sync-now-btn');
-  if (syncNowBtn) syncNowBtn.onclick = async () => { showToast('Syncing…'); await pullFromFirestore(); renderSettings(); };
+  if (syncNowBtn) syncNowBtn.onclick = async () => {
+    showToast('Syncing…');
+    const pushed = await flushSyncQueue();
+    await pullFromFirestore();
+    showToast(pushed > 0 ? `Synced — pushed ${pushed} pending change${pushed === 1 ? '' : 's'}` : 'Sync complete');
+    renderSettings();
+  };
   const forceUploadBtn = viewContainer.querySelector('#force-upload-btn');
   if (forceUploadBtn) forceUploadBtn.onclick = async () => {
     if (!confirm('This will overwrite cloud data with everything on this device. Use this on the device that has the most complete data. Continue?')) return;
