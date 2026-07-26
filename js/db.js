@@ -45,6 +45,7 @@ const SEED_CATEGORIES = [
   { id:25, name:'Groceries',     icon:'🥦', colour:'#8D6E63', isIncome:false, sortOrder:99, isArchived:true, legacyId:2  },
   { id:26, name:'Coffee',        icon:'☕', colour:'#795548', isIncome:false, sortOrder:99, isArchived:true, legacyId:11 },
   { id:27, name:'Bonus',         icon:'⭐', colour:'#FFC107', isIncome:true,  sortOrder:99, isArchived:true, legacyId:30 },
+  { id:28, name:'Misc',          icon:'📦', colour:'#9E9E9E', isIncome:false, sortOrder:13, isArchived:false },
 ];
 
 const SEED_ACCOUNTS = [

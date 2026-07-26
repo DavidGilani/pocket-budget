@@ -19,6 +19,7 @@ const state = {
   recurringTab: 'expenses',
   analysisPeriod: 'month',
   analysisViewingCycle: null,
+  analysisCatCompare: 'lastMonth',
   viewingCycle: null,
   pendingSync: 0,
   currentUser: null,
@@ -42,6 +43,7 @@ function animateCounter(el, from, to, duration = 420) {
 }
 
 function navigate(view, params = {}) {
+  if (view === 'analysis' && state.view !== 'analysis') state.analysisViewingCycle = null;
   Object.assign(state, params);
   state.view = view;
   navBtns.forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -378,7 +380,7 @@ function openDatePicker(currentDate, maxDate, onSelect) {
       const dis = ds > maxDate ? 'disabled' : '';
       return `<button class="datepick-day ${sel} ${dis}" data-date="${ds}" ${dis}>${d}</button>`;
     }).join('');
-    overlay.querySelector('#dp-prev').disabled = viewY <= 2020 && viewM <= 1;
+    overlay.querySelector('#dp-prev').disabled = viewY <= 2010 && viewM <= 1;
     const nextM = viewM === 12 ? 1 : viewM + 1;
     const nextY = viewM === 12 ? viewY + 1 : viewY;
     overlay.querySelector('#dp-next').disabled = `${nextY}-${String(nextM).padStart(2,'0')}-01` > maxDate;
@@ -473,7 +475,8 @@ function closeEntry() {
 async function saveEntry(overlay) {
   const amount = state.entryPence / 100;
   if (!amount || amount <= 0) { showToast('Enter an amount'); return; }
-  if (!state.entryCategory) { showToast('Select a category'); return; }
+  // Auto-assign Misc category for expenses if none selected
+  if (!state.entryCategory && state.entryType === 'expense') state.entryCategory = 28;
 
   const finalAmount = state.entryType === 'expense' ? -amount : amount;
   const txn = {
@@ -632,13 +635,20 @@ async function renderTransactions() {
 }
 
 async function showMonthPicker() {
-  const allTxns = await db.transactions
-    .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
-    .toArray();
-  const monthSet = new Set(allTxns.map(t => t.date.slice(0, 7)));
-  const months = [...monthSet].sort((a, b) => b.localeCompare(a));
+  const firstTxn = await db.transactions.orderBy('date').first();
+  const earliestMonth = firstTxn ? firstTxn.date.slice(0, 7) : today().slice(0, 7);
   const currentKey = state.txnMonth ?? today().slice(0, 7);
   const todayStr = today();
+
+  // Generate every month from earliest to now
+  const months = [];
+  let [ey, em] = earliestMonth.split('-').map(Number);
+  const [cy, cm] = todayStr.slice(0, 7).split('-').map(Number);
+  while (ey < cy || (ey === cy && em <= cm)) {
+    months.push(`${ey}-${String(em).padStart(2, '0')}`);
+    em++; if (em > 12) { em = 1; ey++; }
+  }
+  months.reverse();
 
   // Compute rolling balance (budget left) for each month — the single source of truth
   const balances = await Promise.all(months.map(async mk => {
@@ -962,73 +972,261 @@ async function openRecurringEditor(id, type) {
 }
 
 async function renderAnalysis() {
-  const cycle = await getCurrentCycle();
-  const txns = await db.transactions
+  const todayStr = today();
+
+  // Determine which cycle to view
+  if (!state.analysisViewingCycle) state.analysisViewingCycle = await getCurrentCycle();
+  const cycle = state.analysisViewingCycle;
+  const isCurrentCycle = cycle.end >= todayStr;
+
+  // Fetch current cycle transactions (all types for daily totals, expenses for category analysis)
+  const cycleTxns = await db.transactions
     .where('date').between(cycle.start, cycle.end, true, true)
-    .filter(t => t.type === 'expense' || t.type === 'distributed_expense')
     .toArray();
+
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
+
+  // Daily totals for surplus/loss chart and rolling balance
+  const cutoffDate = isCurrentCycle ? todayStr : cycle.end;
+  const days = [];
+  let dCur = cycle.start;
+  while (dCur <= cutoffDate) { days.push(dCur); dCur = addDays(dCur, 1); }
+
+  const dailyAllowance = await calcDailyAllowance(cycle.start);
+  const dailyByDate = {};
+  for (const t of cycleTxns) {
+    if (!dailyByDate[t.date]) dailyByDate[t.date] = 0;
+    dailyByDate[t.date] += t.amount;
+  }
+
+  // Rolling balance: cumulative (dailyAllowance + net spend each day)
+  const rollingData = [];
+  let runningBal = 0;
+  for (const day of days) {
+    runningBal += dailyAllowance + (dailyByDate[day] ?? 0);
+    rollingData.push({ day, balance: runningBal });
+  }
+
+  // Daily surplus/loss: allowance + net for that day
+  const surplusData = days.map(day => ({
+    day,
+    value: dailyAllowance + (dailyByDate[day] ?? 0),
+  }));
+
+  // Category spending this cycle
+  const expenseTxns = cycleTxns.filter(t => t.type === 'expense' || t.type === 'distributed_expense');
   const byCat = {};
   let totalSpend = 0;
-  for (const t of txns) {
+  for (const t of expenseTxns) {
     if (!byCat[t.categoryId]) byCat[t.categoryId] = 0;
     byCat[t.categoryId] += Math.abs(t.amount);
     totalSpend += Math.abs(t.amount);
   }
-  const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 10);
-  const days = [];
-  let d = cycle.start;
-  while (d <= today() && d <= cycle.end) { days.push(d); d = addDays(d, 1); }
-  const dailyData = await Promise.all(days.map(async day => { const { balance } = await calcRollingBalance(day); return { day, balance }; }));
+  const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+  // Previous cycle for comparison
+  const prevCycleStart = addDays(cycle.start, -1);
+  const prevCycle = await getCycleForDate(prevCycleStart);
+  let prevByCat = {};
+  let avgByCat = {};
+
+  if (prevCycle) {
+    const prevTxns = await db.transactions
+      .where('date').between(prevCycle.start, prevCycle.end, true, true)
+      .filter(t => t.type === 'expense' || t.type === 'distributed_expense')
+      .toArray();
+    for (const t of prevTxns) {
+      if (!prevByCat[t.categoryId]) prevByCat[t.categoryId] = 0;
+      prevByCat[t.categoryId] += Math.abs(t.amount);
+    }
+  }
+
+  // 12-month average by category
+  const avg12Months = [];
+  for (let i = 1; i <= 12; i++) {
+    const dt = new Date(cycle.start + 'T12:00:00');
+    dt.setMonth(dt.getMonth() - i);
+    const ms = isoDate(new Date(dt.getFullYear(), dt.getMonth(), 1));
+    const me = isoDate(new Date(dt.getFullYear(), dt.getMonth() + 1, 0));
+    avg12Months.push({ start: ms, end: me });
+  }
+  const avg12Txns = await db.transactions
+    .where('date').between(avg12Months[11].start, avg12Months[0].end, true, true)
+    .filter(t => t.type === 'expense' || t.type === 'distributed_expense')
+    .toArray();
+  const avg12ByCatMonth = {};
+  for (const t of avg12Txns) {
+    const m = t.date.slice(0, 7);
+    if (!avg12ByCatMonth[t.categoryId]) avg12ByCatMonth[t.categoryId] = {};
+    if (!avg12ByCatMonth[t.categoryId][m]) avg12ByCatMonth[t.categoryId][m] = 0;
+    avg12ByCatMonth[t.categoryId][m] += Math.abs(t.amount);
+  }
+  for (const [cid, months] of Object.entries(avg12ByCatMonth)) {
+    const vals = Object.values(months);
+    avgByCat[cid] = vals.reduce((s, v) => s + v, 0) / 12;
+  }
+
+  // Month-on-month: last 6 cycles
+  const momMonths = [];
+  for (let i = 5; i >= 0; i--) {
+    const dt = new Date(cycle.start + 'T12:00:00');
+    dt.setMonth(dt.getMonth() - i);
+    const ms = isoDate(new Date(dt.getFullYear(), dt.getMonth(), 1));
+    const me = isoDate(new Date(dt.getFullYear(), dt.getMonth() + 1, 0));
+    const mTxns = await db.transactions
+      .where('date').between(ms, me, true, true)
+      .filter(t => t.type === 'expense' || t.type === 'distributed_expense')
+      .toArray();
+    momMonths.push({
+      label: dt.toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }),
+      total: mTxns.reduce((s, t) => s + Math.abs(t.amount), 0),
+    });
+  }
+
+  const compareMode = state.analysisCatCompare;
+  const cycleLabel = new Date(cycle.start + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
   viewContainer.innerHTML = `
     <div class="analysis-screen">
-      <div class="screen-header" style="padding-top:52px"><div style="width:34px"></div><span class="screen-title">Analysis</span><div style="width:34px"></div></div>
-      <div style="padding:8px 12px 4px;font-size:12px;color:var(--text-2);text-align:center">${fmtDate(cycle.start)} - ${fmtDate(cycle.end)}</div>
+      <div class="screen-header" style="padding-top:52px">
+        <button class="icon-btn" id="analysis-prev">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="screen-title">${cycleLabel}</span>
+        <button class="icon-btn" id="analysis-next" ${isCurrentCycle ? 'style="opacity:.3;pointer-events:none"' : ''}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
       <div class="analysis-section">
-        <div class="analysis-section-title">Rolling balance this month</div>
+        <div class="analysis-section-title">Rolling balance</div>
         <div class="chart-wrap"><canvas id="chart-balance"></canvas></div>
       </div>
       <div class="analysis-section">
-        <div class="analysis-section-title">Spending by category (this month)</div>
+        <div class="analysis-section-title">Daily surplus / loss</div>
+        <div class="chart-wrap"><canvas id="chart-surplus"></canvas></div>
+      </div>
+      <div class="analysis-section">
+        <div class="analysis-section-title">Spending by category
+          <span style="float:right;display:flex;gap:4px">
+            <button class="pill-btn ${compareMode === 'lastMonth' ? 'active' : ''}" id="compare-last">vs last month</button>
+            <button class="pill-btn ${compareMode === 'avg12' ? 'active' : ''}" id="compare-avg">vs 12m avg</button>
+          </span>
+        </div>
         ${catRows.length === 0 ? '<div class="empty-state" style="padding:20px 0"><div class="empty-text">No spending data yet</div></div>' : ''}
         ${catRows.map(([cid, total]) => {
           const cat = catMap[cid];
           const pct = totalSpend > 0 ? (total / totalSpend * 100) : 0;
-          return `<div class="cat-bar-row"><span class="cat-bar-label">${cat?.name ?? 'Other'}</span><div class="cat-bar-track"><div class="cat-bar-fill" style="width:${pct}%;background:${cat?.colour ?? '#ccc'}"></div></div><span class="cat-bar-amount">${fmt(total)}</span></div>`;
+          const compareVal = compareMode === 'lastMonth' ? (prevByCat[cid] ?? 0) : (avgByCat[cid] ?? 0);
+          const diff = total - compareVal;
+          const diffStr = compareVal > 0 ? `<span style="font-size:11px;color:${diff > 0 ? '#e53935' : '#43a047'};margin-left:4px">${diff > 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))}</span>` : '';
+          return `<div class="cat-bar-row">
+            <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}${diffStr}</span>
+            <div class="cat-bar-track"><div class="cat-bar-fill" style="width:${pct}%;background:${cat?.colour ?? '#ccc'}"></div></div>
+            <span class="cat-bar-amount">${fmt(total)}</span>
+          </div>`;
         }).join('')}
         ${totalSpend > 0 ? `<div style="text-align:right;margin-top:8px;font-size:13px;color:var(--text-2)">Total: <strong>${fmt(totalSpend)}</strong></div>` : ''}
       </div>
       <div class="analysis-section" style="margin-bottom:80px">
-        <div class="analysis-section-title">Month-on-month (last 6 months)</div>
+        <div class="analysis-section-title">Monthly variable spending (last 6 months)</div>
         <div class="chart-wrap"><canvas id="chart-mom"></canvas></div>
       </div>
     </div>
   `;
 
+  // Rolling balance chart — y-axis scaled to actual data
+  const balValues = rollingData.map(d => d.balance);
+  const balMin = Math.min(...balValues);
+  const balMax = Math.max(...balValues);
+  const balPad = Math.max(Math.abs(balMax - balMin) * 0.1, 10);
+  const yTick = v => Math.abs(v) >= 1000 ? `£${(v/1000).toFixed(1)}k` : `£${v.toFixed(0)}`;
+
   new Chart(viewContainer.querySelector('#chart-balance').getContext('2d'), {
     type: 'line',
     data: {
-      labels: dailyData.map(d => new Date(d.day + 'T12:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })),
-      datasets: [{ data: dailyData.map(d => d.balance), borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.1)', borderWidth: 2, fill: true, tension: 0.4, pointRadius: 0 }],
+      labels: rollingData.map(d => new Date(d.day + 'T12:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })),
+      datasets: [{
+        data: rollingData.map(d => d.balance),
+        borderColor: '#1a73e8',
+        backgroundColor: 'rgba(26,115,232,0.1)',
+        borderWidth: 2, fill: true, tension: 0.4, pointRadius: 0,
+      }],
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 6, font: { size: 11 } } }, y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: v => `£${(v/1000).toFixed(0)}k` } } } },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxTicksLimit: 6, font: { size: 11 } } },
+        y: {
+          min: balMin - balPad, max: balMax + balPad,
+          grid: { color: 'rgba(0,0,0,0.06)' },
+          ticks: { font: { size: 11 }, callback: yTick },
+        },
+      },
+    },
   });
 
-  const months = [];
-  for (let i = 5; i >= 0; i--) {
-    const dt = new Date(); dt.setDate(1); dt.setMonth(dt.getMonth() - i);
-    const ms = isoDate(dt);
-    const me = isoDate(new Date(dt.getFullYear(), dt.getMonth() + 1, 0));
-    const mTxns = await db.transactions.where('date').between(ms, me, true, true).filter(t => t.type === 'expense' || t.type === 'distributed_expense').toArray();
-    months.push({ label: dt.toLocaleDateString('en-GB', { month: 'short' }), total: mTxns.reduce((s, t) => s + Math.abs(t.amount), 0) });
-  }
+  // Surplus/loss bar chart — blue positive, orange negative
+  new Chart(viewContainer.querySelector('#chart-surplus').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: surplusData.map(d => new Date(d.day + 'T12:00:00').toLocaleDateString('en-GB', { day: 'numeric' })),
+      datasets: [{
+        data: surplusData.map(d => d.value),
+        backgroundColor: surplusData.map(d => d.value >= 0 ? 'rgba(26,115,232,0.75)' : 'rgba(239,108,0,0.75)'),
+        borderRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxTicksLimit: 10, font: { size: 10 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+      },
+    },
+  });
 
+  // Month-on-month bar chart
   new Chart(viewContainer.querySelector('#chart-mom').getContext('2d'), {
     type: 'bar',
-    data: { labels: months.map(m => m.label), datasets: [{ data: months.map(m => m.total), backgroundColor: months.map((_, i) => i === 5 ? '#1a73e8' : 'rgba(26,115,232,0.35)'), borderRadius: 6 }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { font: { size: 11 } } }, y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: v => `£${v}` } } } },
+    data: {
+      labels: momMonths.map(m => m.label),
+      datasets: [{
+        data: momMonths.map(m => m.total),
+        backgroundColor: momMonths.map((_, i) => i === 5 ? '#1a73e8' : 'rgba(26,115,232,0.35)'),
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+      },
+    },
+  });
+
+  // Navigation
+  viewContainer.querySelector('#analysis-prev').addEventListener('click', async () => {
+    const prevStart = addDays(cycle.start, -1);
+    state.analysisViewingCycle = await getCycleForDate(prevStart);
+    await renderAnalysis();
+  });
+  viewContainer.querySelector('#analysis-next')?.addEventListener('click', async () => {
+    const nextStart = addDays(cycle.end, 1);
+    state.analysisViewingCycle = await getCycleForDate(nextStart);
+    await renderAnalysis();
+  });
+
+  // Category compare toggle
+  viewContainer.querySelector('#compare-last').addEventListener('click', () => {
+    state.analysisCatCompare = 'lastMonth'; renderAnalysis();
+  });
+  viewContainer.querySelector('#compare-avg').addEventListener('click', () => {
+    state.analysisCatCompare = 'avg12'; renderAnalysis();
   });
 }
 
@@ -1047,8 +1245,9 @@ function makeDistCard(d, catMap) {
 async function renderDistributions() {
   const allDists = await db.distributions.toArray();
   const dists = allDists.filter(d => !d.isIncome);
-  const active = dists.filter(d => !d.isFinished).sort((a, b) => a.startDate.localeCompare(b.startDate));
-  const finished = dists.filter(d => d.isFinished).sort((a, b) => b.endDate.localeCompare(a.endDate));
+  const todayStr = today();
+  const active = dists.filter(d => d.endDate >= todayStr).sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const finished = dists.filter(d => d.endDate < todayStr).sort((a, b) => b.endDate.localeCompare(a.endDate));
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
 
@@ -1074,8 +1273,9 @@ async function renderDistributions() {
 async function renderExtraIncomes() {
   const allDists = await db.distributions.toArray();
   const dists = allDists.filter(d => d.isIncome);
-  const active = dists.filter(d => !d.isFinished).sort((a, b) => a.startDate.localeCompare(b.startDate));
-  const finished = dists.filter(d => d.isFinished).sort((a, b) => b.endDate.localeCompare(a.endDate));
+  const todayStr = today();
+  const active = dists.filter(d => d.endDate >= todayStr).sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const finished = dists.filter(d => d.endDate < todayStr).sort((a, b) => b.endDate.localeCompare(a.endDate));
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
 
@@ -1504,7 +1704,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Jul 2026 (v15)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 21:30 (v16)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -1701,6 +1901,15 @@ async function runDataMigrations() {
         console.warn('Distribution child migration failed:', e);
       }
     }, 2000);
+  }
+
+  if (ver < 4) {
+    const existing = await db.categories.get(28);
+    if (!existing) {
+      await db.categories.add({ id: 28, name: 'Misc', icon: '📦', colour: '#9E9E9E', isIncome: false, sortOrder: 13, isArchived: false });
+      try { await queueWrite('categories', 28); } catch {}
+    }
+    await setSetting('dataVersion', 4);
   }
 }
 
