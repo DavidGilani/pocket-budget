@@ -15,6 +15,7 @@ const state = {
   entryNote: '',
   entryEditId: null,
   txnSearchQuery: '',
+  txnSearchAll: false,
   txnFilter: 'all',
   recurringTab: 'expenses',
   analysisPeriod: 'month',
@@ -524,11 +525,19 @@ async function renderTransactions() {
   const { dailyAllowance } = await calcDailyAllowance(monthStart, monthEnd);
 
   const query = state.txnSearchQuery.toLowerCase();
-  let txns = await db.transactions
-    .where('date').between(monthStart, monthEnd, true, true)
-    .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
-    .toArray();
+  const searchAll = state.txnSearchAll && query.length > 0;
 
+  let txns;
+  if (searchAll) {
+    txns = await db.transactions
+      .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
+      .toArray();
+  } else {
+    txns = await db.transactions
+      .where('date').between(monthStart, monthEnd, true, true)
+      .filter(t => ['expense', 'income', 'distributed_expense', 'distributed_income'].includes(t.type))
+      .toArray();
+  }
   txns.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
   if (query) txns = txns.filter(t => t.note?.toLowerCase().includes(query));
 
@@ -545,13 +554,19 @@ async function renderTransactions() {
     groups[t.date].push(t);
   }
 
-  // Show every day up to today (or month end), not just days with transactions
-  const showUntil = today() < monthEnd ? today() : monthEnd;
-  const allDates = [];
-  let dayCursor = monthStart;
-  while (dayCursor <= showUntil) { allDates.push(dayCursor); dayCursor = addDays(dayCursor, 1); }
-  allDates.reverse();
-  const dates = query ? allDates.filter(d => groups[d]?.length > 0) : allDates;
+  let dates;
+  if (searchAll) {
+    // Only show dates that have matching transactions
+    dates = [...new Set(txns.map(t => t.date))].sort().reverse();
+  } else {
+    // Show every day up to today (or month end)
+    const showUntil = today() < monthEnd ? today() : monthEnd;
+    const allDates = [];
+    let dayCursor = monthStart;
+    while (dayCursor <= showUntil) { allDates.push(dayCursor); dayCursor = addDays(dayCursor, 1); }
+    allDates.reverse();
+    dates = query ? allDates.filter(d => groups[d]?.length > 0) : allDates;
+  }
 
   const budgetRow = `
     <div class="txn-row txn-row-budget">
@@ -567,24 +582,25 @@ async function renderTransactions() {
   viewContainer.innerHTML = `
     <div class="transactions-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('balance')">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-        </button>
+        <div style="width:36px"></div>
         <span class="screen-title">Transactions</span>
         <button class="icon-btn" id="txn-add-btn">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
       </div>
-      <button id="month-picker-btn" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--card);border:none;border-bottom:1px solid var(--border);width:100%;cursor:pointer;font-size:15px;color:var(--text)">
+      ${!searchAll ? `<button id="month-picker-btn" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--card);border:none;border-bottom:1px solid var(--border);width:100%;cursor:pointer;font-size:15px;color:var(--text)">
         <span style="font-weight:500">${monthLabel}</span>
         <span style="display:flex;align-items:center;gap:6px;color:var(--text-2);font-size:13px">
           ${txns.length > 0 ? `<span style="color:${monthTotal >= 0 ? 'var(--green)' : 'var(--red)'}">${monthTotal >= 0 ? '+' : ''}${fmt(monthTotal)}</span>` : ''}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </span>
-      </button>
+      </button>` : `<div style="padding:8px 16px;font-size:13px;color:var(--text-2);background:var(--card);border-bottom:1px solid var(--border)">Searching all transactions (${txns.length} found)</div>`}
       <div class="search-bar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="txn-search" placeholder="Search transactions..." value="${state.txnSearchQuery}" style="flex:1;border:none;outline:none;font-size:15px;background:none">
+        <input type="text" id="txn-search" placeholder="Search transactions..." value="${state.txnSearchQuery}" style="flex:1;border:none;outline:none;font-size:15px;background:none" autocomplete="off" autocorrect="off" autocapitalize="off">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);white-space:nowrap;cursor:pointer;padding-left:6px">
+          <input type="checkbox" id="txn-search-all" ${state.txnSearchAll ? 'checked' : ''} style="accent-color:var(--blue)"> All
+        </label>
       </div>
       <div id="txn-list-body">
         ${dates.length === 0 ? `
@@ -601,7 +617,7 @@ async function renderTransactions() {
                 <button class="day-add-btn" data-date="${date}">+</button>
               </div>
               <div class="txn-list">
-                ${budgetRow}
+                ${!searchAll ? budgetRow : ''}
                 ${dayTxns.map(t => {
                   const cat = catMap[t.categoryId];
                   const sign = t.amount >= 0 ? '+' : '';
@@ -618,7 +634,7 @@ async function renderTransactions() {
                   `;
                 }).join('')}
               </div>
-              <div class="day-total"><div class="day-total-amount ${dayTotal < 0 ? 'negative' : ''}">${fmt(dayTotal)}</div></div>
+              ${!searchAll ? `<div class="day-total"><div class="day-total-amount ${dayTotal < 0 ? 'negative' : ''}">${fmt(dayTotal)}</div></div>` : ''}
             </div>
           `;
         }).join('')}
@@ -628,8 +644,21 @@ async function renderTransactions() {
 
   const txnScreen = viewContainer.querySelector('.transactions-screen');
   txnScreen.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
-  txnScreen.querySelector('#txn-search').oninput = e => { state.txnSearchQuery = e.target.value; renderTransactions(); };
-  txnScreen.querySelector('#month-picker-btn').onclick = () => showMonthPicker();
+  let _searchTimer;
+  txnScreen.querySelector('#txn-search').addEventListener('input', e => {
+    state.txnSearchQuery = e.target.value;
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(async () => {
+      await renderTransactions();
+      const inp = viewContainer.querySelector('#txn-search');
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    }, 250);
+  });
+  txnScreen.querySelector('#txn-search-all').addEventListener('change', e => {
+    state.txnSearchAll = e.target.checked;
+    renderTransactions();
+  });
+  txnScreen.querySelector('#month-picker-btn')?.addEventListener('click', () => showMonthPicker());
   delegate(txnScreen, 'click', '.txn-row:not([data-swiped])', (e, el) => {
     if (!el.dataset.txnId) return;
     showTxnMenu(Number(el.dataset.txnId));
@@ -1151,11 +1180,15 @@ async function renderAnalysis() {
     </div>
   `;
 
-  // Rolling balance chart — y-axis scaled to actual data
+  // Rolling balance chart — consistent y-axis intervals
   const balValues = rollingData.map(d => d.balance);
-  const balMin = Math.min(...balValues);
-  const balMax = Math.max(...balValues);
-  const balPad = Math.max(Math.abs(balMax - balMin) * 0.1, 10);
+  const balRawMin = Math.min(...balValues);
+  const balRawMax = Math.max(...balValues);
+  const balNiceSteps = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+  const balRange = balRawMax - balRawMin;
+  const balStep = balNiceSteps.find(s => balRange / s <= 7) ?? 5000;
+  const balMin = Math.floor(balRawMin / balStep) * balStep;
+  const balMax = Math.ceil(balRawMax / balStep) * balStep;
   const yTick = v => Math.abs(v) >= 1000 ? `£${(v/1000).toFixed(1)}k` : `£${v.toFixed(0)}`;
 
   new Chart(viewContainer.querySelector('#chart-balance').getContext('2d'), {
@@ -1175,9 +1208,9 @@ async function renderAnalysis() {
       scales: {
         x: { grid: { display: false }, ticks: { maxTicksLimit: 6, font: { size: 11 } } },
         y: {
-          min: balMin - balPad, max: balMax + balPad,
+          min: balMin, max: balMax,
           grid: { color: 'rgba(0,0,0,0.06)' },
-          ticks: { font: { size: 11 }, callback: yTick },
+          ticks: { stepSize: balStep, font: { size: 11 }, callback: yTick },
         },
       },
     },
@@ -2305,29 +2338,72 @@ function bgFmt(v) {
 }
 
 function bgRunningBalance(txs) {
-  // Returns txs augmented with running `balance` field, oldest first
   let bal = 0;
   return txs.map(t => { bal += t.amount; return { ...t, balance: bal }; });
+}
+
+function bgHoldingName(h) {
+  return h.name || h.person || h.holder || h.label || h.account || 'Account #' + h.id;
+}
+
+function bgRatePeriods(h) {
+  if (h.ratePeriods) {
+    try { return JSON.parse(h.ratePeriods); } catch {}
+  }
+  if (h.interestRate != null) return [{ fromDate: '2020-01-01', rate: h.interestRate }];
+  return [];
+}
+
+// Simple interest: amount * rate * days / 365, split across rate periods
+function bgInterestOnAmount(amount, txDate, ratePeriods, toDate) {
+  if (amount === 0 || ratePeriods.length === 0) return 0;
+  const sorted = [...ratePeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
+  let interest = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const periodStart = sorted[i].fromDate;
+    const periodEnd = i + 1 < sorted.length ? sorted[i + 1].fromDate : toDate;
+    const start = txDate > periodStart ? txDate : periodStart;
+    const end = periodEnd < toDate ? periodEnd : toDate;
+    if (start >= end) continue;
+    const days = diffDays(start, end);
+    interest += amount * sorted[i].rate / 100 * days / 365;
+  }
+  return interest;
+}
+
+// Total with interest: each transaction accrues simple interest from its date to toDate
+function bgTotalWithInterest(txs, ratePeriods, toDate) {
+  return txs.reduce((sum, t) => {
+    return sum + t.amount + bgInterestOnAmount(t.amount, t.date, ratePeriods, toDate);
+  }, 0);
 }
 
 async function renderBankGilulu(activeHoldingId = null) {
   const holdings = await db.friendHoldings.filter(h => h.isActive !== false).toArray();
 
-  // Default to first holding
   let holding = activeHoldingId
     ? holdings.find(h => h.id === activeHoldingId)
     : holdings[0];
 
+  const ratePeriods = holding ? bgRatePeriods(holding) : [];
+  const currentRateEntry = [...ratePeriods].sort((a, b) => b.fromDate.localeCompare(a.fromDate))[0];
+  const currentRate = currentRateEntry?.rate ?? null;
+  const toDate = today();
+
   const allTxs = holding
     ? await db.friendTransactions.where('holdingId').equals(holding.id).sortBy('date')
     : [];
-  const withBal = bgRunningBalance(allTxs);
-  const currentBalance = withBal.length > 0 ? withBal[withBal.length - 1].balance : 0;
-  const displayTxs = [...withBal].reverse(); // newest first for display
+
+  // Total with interest per the spreadsheet formula
+  const totalWithInterest = bgTotalWithInterest(allTxs, ratePeriods, toDate);
+  const principalTotal = allTxs.reduce((s, t) => s + t.amount, 0);
+  const interestEarned = totalWithInterest - principalTotal;
+
+  const displayTxs = [...allTxs].reverse(); // newest first
 
   function tabsHTML() {
     return holdings.map(h => `
-      <button class="pill-btn${holding && h.id === holding.id ? ' active' : ''}" data-holding-id="${h.id}">${h.name}</button>
+      <button class="pill-btn${holding && h.id === holding.id ? ' active' : ''}" data-holding-id="${h.id}">${bgHoldingName(h)}</button>
     `).join('') + `<button class="pill-btn" id="bg-add-account">+ Add</button>`;
   }
 
@@ -2338,20 +2414,29 @@ async function renderBankGilulu(activeHoldingId = null) {
         <thead>
           <tr style="border-bottom:1.5px solid var(--border)">
             <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DATE</th>
-            <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DESCRIPTION</th>
             <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">AMOUNT</th>
-            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">BALANCE</th>
+            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">INTEREST</th>
+            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">TOTAL</th>
           </tr>
         </thead>
         <tbody>
-          ${displayTxs.map(t => `
-            <tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
-              <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}</td>
-              <td style="padding:8px;color:var(--text)">${t.description || (t.isInterest ? 'Interest' : '—')}</td>
+          ${displayTxs.map(t => {
+            const interest = bgInterestOnAmount(t.amount, t.date, ratePeriods, toDate);
+            const totalRow = t.amount + interest;
+            const days = diffDays(t.date, toDate);
+            return `<tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
+              <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}<br><span style="font-size:10px">${days}d</span></td>
               <td style="padding:8px;text-align:right;font-weight:600;color:${t.amount >= 0 ? '#43a047' : 'var(--coral)'}">${t.amount >= 0 ? '+' : ''}${bgFmt(t.amount)}</td>
-              <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(t.balance)}</td>
-            </tr>
-          `).join('')}
+              <td style="padding:8px;text-align:right;color:${interest >= 0 ? '#43a047' : 'var(--coral)'}">+${bgFmt(Math.abs(interest))}</td>
+              <td style="padding:8px;text-align:right;font-weight:700;color:${totalRow >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(totalRow)}</td>
+            </tr>`;
+          }).join('')}
+          <tr style="border-top:2px solid var(--border);background:var(--bg)">
+            <td style="padding:8px;font-weight:700;font-size:12px;color:var(--text-2)">TOTAL</td>
+            <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(principalTotal)}</td>
+            <td style="padding:8px;text-align:right;font-weight:700;color:#43a047">+${bgFmt(interestEarned)}</td>
+            <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(totalWithInterest)}</td>
+          </tr>
         </tbody>
       </table>
     `;
@@ -2377,7 +2462,6 @@ async function renderBankGilulu(activeHoldingId = null) {
           <button class="btn btn-primary" id="bg-first-account">Add first account</button>
         </div>
       ` : `
-        <!-- Account tabs -->
         <div style="padding:10px 12px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           ${tabsHTML()}
         </div>
@@ -2385,82 +2469,71 @@ async function renderBankGilulu(activeHoldingId = null) {
         <!-- Balance card — screenshot-friendly -->
         <div style="margin:12px;padding:20px;background:var(--card);border-radius:var(--radius);box-shadow:0 1px 4px rgba(0,0,0,.08)">
           <div style="font-size:12px;color:var(--text-2);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px">
-            Bank of Gilulu — ${holding?.name ?? ''}
+            Bank of Gilulu — ${bgHoldingName(holding)}
           </div>
-          <div style="font-size:36px;font-weight:800;letter-spacing:-1px;color:${currentBalance >= 0 ? 'var(--text)' : 'var(--coral)'}">
-            ${bgFmt(currentBalance)}
+          <div style="font-size:36px;font-weight:800;letter-spacing:-1px;color:${totalWithInterest >= 0 ? 'var(--text)' : 'var(--coral)'}">
+            ${bgFmt(totalWithInterest)}
           </div>
           <div style="font-size:12px;color:var(--text-2);margin-top:4px">
-            Current balance · ${new Date().toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}
+            Balance with interest · ${new Date().toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}
           </div>
           <div style="display:flex;gap:12px;margin-top:14px">
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Interest rate (p.a.)</div>
-              <div style="font-size:15px;font-weight:700;cursor:pointer" id="bg-rate-display">${holding?.interestRate != null ? holding.interestRate + '%' : 'Set rate'}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Principal</div>
+              <div style="font-size:14px;font-weight:700">${bgFmt(principalTotal)}</div>
             </div>
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Transactions</div>
-              <div style="font-size:15px;font-weight:700">${allTxs.length}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Interest earned</div>
+              <div style="font-size:14px;font-weight:700;color:#43a047">+${bgFmt(interestEarned)}</div>
+            </div>
+            <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Current rate</div>
+              <div style="font-size:14px;font-weight:700">${currentRate != null ? currentRate + '%' : '—'}</div>
             </div>
           </div>
         </div>
 
         <!-- Transaction table -->
-        <div style="margin:0 12px 12px;background:var(--card);border-radius:var(--radius);overflow:hidden;overflow-x:auto">
+        <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);overflow:hidden;overflow-x:auto">
           ${txTableHTML()}
         </div>
 
-        <!-- Add interest button -->
-        ${holding?.interestRate != null ? `
-          <div style="padding:0 12px 12px">
-            <button class="btn" id="bg-add-interest-btn" style="width:100%;border:1.5px dashed var(--border);background:transparent;color:var(--text-2)">
-              + Add interest entry
-            </button>
+        <!-- Interest rate log button -->
+        <div style="padding:0 12px 80px">
+          <div class="settings-card">
+            <div class="settings-row" style="cursor:pointer" id="bg-rate-log-btn">
+              <span class="settings-row-icon">📈</span>
+              <span class="settings-row-label">Interest rate log</span>
+              <span style="margin-left:auto;color:var(--text-2);font-size:13px">${currentRate != null ? currentRate + '% p.a.' : 'Not set'}</span>
+              <span class="settings-row-chevron">›</span>
+            </div>
+            <div class="settings-row" style="cursor:pointer" id="bg-rename-btn">
+              <span class="settings-row-icon">✏️</span>
+              <span class="settings-row-label">Rename / archive account</span>
+              <span class="settings-row-chevron">›</span>
+            </div>
           </div>
-        ` : ''}
+        </div>
       `}
-
-      <div style="padding-bottom:80px"></div>
     </div>
   `;
 
   const screen = viewContainer.querySelector('#bg-screen');
 
-  // First account button
   screen.querySelector('#bg-first-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
-
-  // Account tabs
   screen.querySelectorAll('[data-holding-id]').forEach(btn => {
     btn.addEventListener('click', () => renderBankGilulu(Number(btn.dataset.holdingId)));
   });
-
-  // Add account tab
-  screen.querySelector('#bg-add-account')?.addEventListener('click', () => {
-    openBgAccountEditor(null, () => renderBankGilulu());
-  });
-
-  // Add transaction
+  screen.querySelector('#bg-add-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
   screen.querySelector('#bg-add-tx-btn')?.addEventListener('click', () => {
     if (holding) openBgTxEditor(null, holding.id, () => renderBankGilulu(holding.id));
   });
-
-  // Edit rate
-  screen.querySelector('#bg-rate-display')?.addEventListener('click', () => {
-    if (!holding) return;
-    openAmountPad('Annual interest rate', holding.interestRate ?? 0, async val => {
-      await db.friendHoldings.update(holding.id, { interestRate: Math.abs(val) });
-      queueWrite('friendHoldings', holding.id).catch(() => {});
-      renderBankGilulu(holding.id);
-    }, { prefix: '', suffix: '%', noNegative: true, decimals: 2 });
+  screen.querySelector('#bg-rate-log-btn')?.addEventListener('click', () => {
+    if (holding) openBgRateLogEditor(holding, () => renderBankGilulu(holding.id));
   });
-
-  // Add interest
-  screen.querySelector('#bg-add-interest-btn')?.addEventListener('click', () => {
-    if (!holding) return;
-    openBgAddInterest(holding, currentBalance, withBal, () => renderBankGilulu(holding.id));
+  screen.querySelector('#bg-rename-btn')?.addEventListener('click', () => {
+    if (holding) openBgAccountEditor(holding, () => renderBankGilulu());
   });
-
-  // Edit/delete transaction
   screen.querySelectorAll('.bg-tx-row').forEach(row => {
     row.addEventListener('click', () => {
       const txId = Number(row.dataset.txId);
@@ -2522,11 +2595,15 @@ function openBgAccountEditor(existing, onDone) {
 function openBgTxEditor(existing, holdingId, onDone) {
   const isNew = !existing;
   let amount = existing?.amount ?? 0;
+  let currentDate = existing?.date ?? today();
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
 
   function build() {
+    const existingDateInput = overlay.querySelector('#bgte-date');
+    if (existingDateInput?.value) currentDate = existingDateInput.value;
+
     overlay.innerHTML = `
       <div class="sheet">
         <div class="sheet-handle"></div>
@@ -2537,18 +2614,14 @@ function openBgTxEditor(existing, holdingId, onDone) {
         <div class="sheet-body" style="padding:16px">
           <div class="form-group">
             <label class="form-label">Date</label>
-            <input class="form-input" id="bgte-date" type="date" value="${existing?.date ?? today()}">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Description</label>
-            <input class="form-input" id="bgte-desc" type="text" placeholder="e.g. Initial deposit" value="${existing?.description ?? ''}">
+            <input class="form-input" id="bgte-date" type="date" value="${currentDate}">
           </div>
           <div class="form-group">
             <label class="form-label">Amount</label>
-            <div class="entry-amount-display" id="bgte-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:${amount < 0 ? 'var(--coral)' : 'var(--text)'}">
+            <div class="entry-amount-display" id="bgte-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:${amount < 0 ? 'var(--coral)' : '#43a047'}">
               ${amount >= 0 ? '+' : ''}${bgFmt(amount)}
             </div>
-            <div style="font-size:12px;color:var(--text-2);margin-top:4px">Positive = deposit, negative = withdrawal</div>
+            <div style="font-size:12px;color:var(--text-2);margin-top:4px">Positive = deposit · Negative = withdrawal</div>
           </div>
           <div style="display:flex;gap:8px;padding-top:8px;padding-bottom:24px">
             ${!isNew ? `<button class="btn btn-danger" id="bgte-del">Delete</button>` : ''}
@@ -2563,13 +2636,12 @@ function openBgTxEditor(existing, holdingId, onDone) {
     });
     overlay.querySelector('#bgte-save').onclick = async () => {
       const date = overlay.querySelector('#bgte-date').value;
-      const description = overlay.querySelector('#bgte-desc').value.trim();
       if (!date) { showToast('Enter a date'); return; }
       if (isNew) {
-        const id = await db.friendTransactions.add({ holdingId, date, amount, description, isInterest: false });
+        const id = await db.friendTransactions.add({ holdingId, date, amount, isInterest: false });
         queueWrite('friendTransactions', id).catch(() => {});
       } else {
-        await db.friendTransactions.update(existing.id, { date, amount, description });
+        await db.friendTransactions.update(existing.id, { date, amount });
         queueWrite('friendTransactions', existing.id).catch(() => {});
       }
       overlay.remove();
@@ -2589,86 +2661,77 @@ function openBgTxEditor(existing, holdingId, onDone) {
   build();
 }
 
-function openBgAddInterest(holding, currentBalance, withBal, onDone) {
-  // Find last interest entry date, or first transaction date
-  const lastInterest = [...withBal].reverse().find(t => t.isInterest);
-  const lastInterestDate = lastInterest?.date;
-  const fromTx = withBal[0];
-  const fromDate = lastInterestDate ?? fromTx?.date ?? today();
-  const toDate = today();
-
-  if (currentBalance <= 0 || !holding.interestRate) {
-    showToast('Set an interest rate first');
-    return;
-  }
-
-  // Compute interest: daily compound from fromDate to toDate on current balance
-  // Simple approach: interest on balance at fromDate point, compounded daily
-  const days = diffDays(fromDate, toDate);
-  const balAtFrom = lastInterest ? lastInterest.balance : (withBal[0]?.balance ?? 0);
-  const interestAmount = balAtFrom > 0
-    ? balAtFrom * (Math.pow(1 + holding.interestRate / 100 / 365, days) - 1)
-    : 0;
+function openBgRateLogEditor(holding, onDone) {
+  let periods = bgRatePeriods(holding).sort((a, b) => b.fromDate.localeCompare(a.fromDate)); // newest first
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
-  overlay.innerHTML = `
-    <div class="sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-header">
-        <span class="sheet-title">Add interest</span>
-        <button class="sheet-close" id="bgai-close">✕</button>
-      </div>
-      <div class="sheet-body" style="padding:16px">
-        <div style="background:var(--bg);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text-2)">
-          <strong style="color:var(--text)">${holding.interestRate}% p.a.</strong> on <strong style="color:var(--text)">${bgFmt(balAtFrom)}</strong><br>
-          From ${new Date(fromDate + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}
-          to ${new Date(toDate + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })} (${days} days)
-        </div>
-        <div class="form-group">
-          <label class="form-label">Interest amount (auto-calculated)</label>
-          <div class="entry-amount-display" id="bgai-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:#43a047">
-            +${bgFmt(interestAmount)}
-          </div>
-          <div style="font-size:12px;color:var(--text-2);margin-top:4px">Tap to override</div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Date</label>
-          <input class="form-input" id="bgai-date" type="date" value="${toDate}">
-        </div>
-        <div style="padding-top:8px;padding-bottom:24px">
-          <button class="btn btn-primary btn-full" id="bgai-save">Add interest entry</button>
-        </div>
-      </div>
-    </div>
-  `;
   document.body.appendChild(overlay);
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-  overlay.querySelector('#bgai-close').onclick = () => overlay.remove();
 
-  let overrideAmount = interestAmount;
-  const display = overlay.querySelector('#bgai-amount-display');
-  display.addEventListener('click', () => {
-    openAmountPad('Interest amount', overrideAmount, val => {
-      overrideAmount = Math.abs(val);
-      display.textContent = '+' + bgFmt(overrideAmount);
-    }, { noNegative: true });
-  });
+  function build() {
+    overlay.innerHTML = `
+      <div class="sheet" style="max-height:85vh">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">Interest rate log</span>
+          <button class="sheet-close" id="bgrl-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(85vh - 60px)">
+          <div style="font-size:13px;color:var(--text-2);margin-bottom:12px;line-height:1.5">Each entry sets the rate from that date onward until the next entry. Tap a rate to edit. Newest first.</div>
+          ${periods.length === 0 ? `<div style="color:var(--text-2);font-size:13px;padding:8px 0">No rates set yet.</div>` : ''}
+          ${periods.map((p, i) => `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <input class="form-input bgrl-date" data-idx="${i}" type="date" value="${p.fromDate}" style="flex:1;font-size:13px;padding:6px 10px">
+              <button class="bgrl-rate-btn" data-idx="${i}" style="font-size:14px;font-weight:600;padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg);cursor:pointer;min-width:70px">${p.rate}%</button>
+              <button class="bgrl-del-btn" data-idx="${i}" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--coral);font-size:13px;cursor:pointer">✕</button>
+            </div>
+          `).join('')}
+          <button class="btn" id="bgrl-add" style="width:100%;border:1.5px dashed var(--border);background:transparent;color:var(--text-2);margin-top:4px">+ Add rate period</button>
+          <button class="btn btn-primary btn-full" id="bgrl-save" style="margin-top:12px;margin-bottom:24px">Save</button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('#bgrl-close').onclick = () => overlay.remove();
 
-  overlay.querySelector('#bgai-save').onclick = async () => {
-    const date = overlay.querySelector('#bgai-date').value;
-    const id = await db.friendTransactions.add({
-      holdingId: holding.id,
-      date,
-      amount: overrideAmount,
-      description: `Interest (${holding.interestRate}% p.a.)`,
-      isInterest: true,
+    overlay.querySelectorAll('.bgrl-rate-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = Number(btn.dataset.idx);
+        openAmountPad(`Rate from ${periods[i].fromDate}`, periods[i].rate, val => {
+          periods[i].rate = Math.abs(val);
+          build();
+        }, { prefix: '', suffix: '%', noNegative: true, decimals: 2 });
+      });
     });
-    queueWrite('friendTransactions', id).catch(() => {});
-    overlay.remove();
-    onDone();
-    showToast('Interest added');
-  };
+
+    overlay.querySelectorAll('.bgrl-del-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        periods.splice(Number(btn.dataset.idx), 1);
+        build();
+      });
+    });
+
+    overlay.querySelector('#bgrl-add').addEventListener('click', () => {
+      periods.unshift({ fromDate: today(), rate: periods[0]?.rate ?? 4 });
+      build();
+    });
+
+    overlay.querySelector('#bgrl-save').onclick = async () => {
+      // Read any edited dates before saving
+      overlay.querySelectorAll('.bgrl-date').forEach(inp => {
+        const i = Number(inp.dataset.idx);
+        if (periods[i]) periods[i].fromDate = inp.value;
+      });
+      const sorted = [...periods].sort((a, b) => b.fromDate.localeCompare(a.fromDate));
+      await db.friendHoldings.update(holding.id, { ratePeriods: JSON.stringify(sorted) });
+      queueWrite('friendHoldings', holding.id).catch(() => {});
+      overlay.remove();
+      onDone();
+      showToast('Interest rate log saved');
+    };
+  }
+
+  build();
 }
 
 async function renderSettings() {
@@ -2751,7 +2814,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 01:00 (v22)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 02:00 (v23)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2974,6 +3037,28 @@ async function runDataMigrations() {
     for (const s of wrongSnaps) {
       await db.accountSnapshots.update(s.id, { date: '2026-02-01' });
       queueWrite('accountSnapshots', s.id).catch(() => {});
+    }
+  }
+
+  if (ver < 7) {
+    await setSetting('dataVersion', 7);
+    // Normalize friendHoldings: ensure `name` field is set from alternative field names
+    const fh = await db.friendHoldings.toArray();
+    for (const h of fh) {
+      if (!h.name) {
+        const name = h.person ?? h.holder ?? h.label ?? h.account ?? null;
+        if (name) {
+          await db.friendHoldings.update(h.id, { name });
+          queueWrite('friendHoldings', h.id).catch(() => {});
+        }
+      }
+      // Seed default interest rate periods from legacy interestRate field
+      if (h.interestRate != null && !h.ratePeriods) {
+        await db.friendHoldings.update(h.id, {
+          ratePeriods: JSON.stringify([{ fromDate: '2020-01-01', rate: h.interestRate }]),
+        });
+        queueWrite('friendHoldings', h.id).catch(() => {});
+      }
     }
   }
 }
