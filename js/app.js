@@ -2412,7 +2412,12 @@ async function renderBankGilulu(activeHoldingId = null) {
     return sum + bgInterestOnAmount(t.amount, effectiveStart, ratePeriods, toDate);
   }, 0);
 
-  const displayTxs = [...allTxs].reverse(); // newest first
+  // Pre-compute running balance (total with interest to today) at each tx, ascending
+  const txsWithBalance = allTxs.map((t, i) => {
+    const txsUpTo = allTxs.slice(0, i + 1);
+    return { ...t, runningBalance: bgTotalWithInterest(txsUpTo, ratePeriods, toDate) };
+  });
+  const displayTxs = [...txsWithBalance].reverse(); // newest first
 
   function tabsHTML() {
     return holdings.map(h => `
@@ -2429,19 +2434,18 @@ async function renderBankGilulu(activeHoldingId = null) {
             <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DATE</th>
             <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">AMOUNT</th>
             <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">INTEREST</th>
-            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">TOTAL</th>
+            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">BALANCE</th>
           </tr>
         </thead>
         <tbody>
           ${displayTxs.map(t => {
             const interest = bgInterestOnAmount(t.amount, t.date, ratePeriods, toDate);
-            const totalRow = t.amount + interest;
             const days = diffDays(t.date, toDate);
             return `<tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
               <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}<br><span style="font-size:10px">${days}d</span></td>
               <td style="padding:8px;text-align:right;font-weight:600;color:${t.amount >= 0 ? '#43a047' : 'var(--coral)'}">${t.amount >= 0 ? '+' : ''}${bgFmt(t.amount)}</td>
               <td style="padding:8px;text-align:right;color:${interest >= 0 ? '#43a047' : 'var(--coral)'}">${interest >= 0 ? '+' : ''}${bgFmt(interest)}</td>
-              <td style="padding:8px;text-align:right;font-weight:700;color:${totalRow >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(totalRow)}</td>
+              <td style="padding:8px;text-align:right;font-weight:700;color:${t.runningBalance >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(t.runningBalance)}</td>
             </tr>`;
           }).join('')}
           <tr style="border-top:2px solid var(--border);background:var(--bg)">
@@ -2647,81 +2651,87 @@ function openBgAccountEditor(existing, onDone) {
 
 function openBgTxEditor(existing, holdingId, onDone) {
   const isNew = !existing;
-  let amount = existing?.amount ?? 0;
+  let pence = Math.round(Math.abs(existing?.amount ?? 0) * 100);
+  let negative = (existing?.amount ?? 0) < 0;
   let currentDate = existing?.date ?? today();
+
+  function getAmount() { return (negative ? -1 : 1) * pence / 100; }
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
-
-  function build() {
-    const existingDateInput = overlay.querySelector('#bgte-date');
-    if (existingDateInput?.value) currentDate = existingDateInput.value;
-
-    overlay.innerHTML = `
-      <div class="sheet">
-        <div class="sheet-handle"></div>
-        <div class="sheet-header" style="display:grid;grid-template-columns:44px 1fr 44px;align-items:center;padding:14px 12px">
-          <button class="sheet-close" id="bgte-close" style="justify-self:start">✕</button>
-          <span class="sheet-title" style="text-align:center">${isNew ? 'New deposit / withdrawal' : 'Edit transaction'}</span>
-          <button id="bgte-save-hdr" style="justify-self:end;background:none;border:none;cursor:pointer;font-size:22px;font-weight:700;color:var(--blue);padding:4px">✓</button>
-        </div>
-        <div class="sheet-body" style="padding:16px">
-          <div class="form-group">
-            <label class="form-label">Date</label>
-            <input class="form-input" id="bgte-date" type="date" value="${currentDate}">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Amount</label>
-            <div class="entry-amount-display" id="bgte-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:${amount < 0 ? 'var(--coral)' : '#43a047'}">
-              ${amount >= 0 ? '+' : ''}${bgFmt(amount)}
-            </div>
-            <div style="font-size:12px;color:var(--text-2);margin-top:4px">Positive = deposit · Negative = withdrawal</div>
-          </div>
-          <div style="display:flex;gap:8px;padding-top:8px;padding-bottom:24px">
-            ${!isNew ? `<button class="btn btn-danger" id="bgte-del">Delete</button>` : ''}
-            <button class="btn btn-primary" id="bgte-save" style="flex:1">Save</button>
-          </div>
-        </div>
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header" style="display:grid;grid-template-columns:44px 1fr 44px;align-items:center;padding:14px 12px">
+        <button class="sheet-close" id="bgte-close" style="justify-self:start">✕</button>
+        <span class="sheet-title" style="text-align:center">${isNew ? 'New deposit / withdrawal' : 'Edit transaction'}</span>
+        <button id="bgte-save-hdr" style="justify-self:end;background:none;border:none;cursor:pointer;font-size:22px;font-weight:700;color:var(--blue);padding:4px">✓</button>
       </div>
-    `;
-
-    async function doSave() {
-      const date = overlay.querySelector('#bgte-date').value;
-      if (!date) { showToast('Enter a date'); return; }
-      if (amount === 0) { showToast('Enter an amount'); return; }
-      if (isNew) {
-        const id = await db.friendTransactions.add({ holdingId, date, amount, isInterest: false });
-        queueWrite('friendTransactions', id).catch(() => {});
-      } else {
-        await db.friendTransactions.update(existing.id, { date, amount });
-        queueWrite('friendTransactions', existing.id).catch(() => {});
-      }
-      overlay.remove();
-      onDone();
-    }
-
-    overlay.querySelector('#bgte-close').onclick = () => overlay.remove();
-    overlay.querySelector('#bgte-save-hdr').onclick = doSave;
-    overlay.querySelector('#bgte-amount-display').addEventListener('click', () => {
-      openAmountPad('Transaction amount', amount, val => { amount = val; build(); });
-    });
-    overlay.querySelector('#bgte-date').addEventListener('change', () => {
-      currentDate = overlay.querySelector('#bgte-date').value;
-      if (amount !== 0) doSave();
-    });
-    overlay.querySelector('#bgte-save').onclick = doSave;
-    overlay.querySelector('#bgte-del')?.addEventListener('click', async () => {
-      if (!confirm('Delete this transaction?')) return;
-      await db.friendTransactions.delete(existing.id);
-      queueDelete('friendTransactions', existing.id).catch(() => {});
-      overlay.remove();
-      onDone();
-    });
-  }
+      <div class="sheet-body" style="padding:12px 16px 0">
+        <div class="form-group" style="margin-bottom:10px">
+          <label class="form-label">Date</label>
+          <input class="form-input" id="bgte-date" type="date" value="${currentDate}">
+        </div>
+        <div id="bgte-amount-display" style="font-size:36px;font-weight:800;text-align:center;padding:8px 0;color:${negative ? 'var(--coral)' : '#43a047'}">
+          ${!negative ? '+' : ''}${bgFmt(getAmount())}
+        </div>
+        <div style="font-size:11px;color:var(--text-2);text-align:center;margin-bottom:12px">Positive = deposit · Negative = withdrawal</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
+          ${[1,2,3,4,5,6,7,8,9].map(n => `<button class="numpad-key" data-n="${n}">${n}</button>`).join('')}
+          <button class="numpad-key" id="bgte-toggle" style="font-size:15px">±</button>
+          <button class="numpad-key" data-n="0">0</button>
+          <button class="numpad-key delete" id="bgte-del-key">⌫</button>
+        </div>
+        ${!isNew ? `<button class="btn btn-danger" id="bgte-del-tx" style="width:100%;margin-top:4px;margin-bottom:20px">Delete transaction</button>` : '<div style="height:20px"></div>'}
+      </div>
+    </div>
+  `;
 
   document.body.appendChild(overlay);
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-  build();
+
+  function refreshDisplay() {
+    const a = getAmount();
+    const disp = overlay.querySelector('#bgte-amount-display');
+    if (!disp) return;
+    disp.style.color = a < 0 ? 'var(--coral)' : '#43a047';
+    disp.textContent = (a >= 0 ? '+' : '') + bgFmt(a);
+  }
+
+  async function doSave() {
+    const date = overlay.querySelector('#bgte-date').value;
+    if (!date) { showToast('Enter a date'); return; }
+    const amount = getAmount();
+    if (amount === 0) { showToast('Enter an amount'); return; }
+    if (isNew) {
+      const id = await db.friendTransactions.add({ holdingId, date, amount, isInterest: false });
+      queueWrite('friendTransactions', id).catch(() => {});
+    } else {
+      await db.friendTransactions.update(existing.id, { date, amount });
+      queueWrite('friendTransactions', existing.id).catch(() => {});
+    }
+    overlay.remove();
+    onDone();
+  }
+
+  overlay.querySelector('#bgte-close').onclick = () => overlay.remove();
+  overlay.querySelector('#bgte-save-hdr').onclick = doSave;
+  overlay.querySelector('#bgte-date').addEventListener('change', () => {
+    currentDate = overlay.querySelector('#bgte-date').value;
+    if (getAmount() !== 0) doSave();
+  });
+  overlay.querySelectorAll('[data-n]').forEach(btn => {
+    btn.addEventListener('click', () => { pence = pence * 10 + Number(btn.dataset.n); refreshDisplay(); });
+  });
+  overlay.querySelector('#bgte-toggle').addEventListener('click', () => { negative = !negative; refreshDisplay(); });
+  overlay.querySelector('#bgte-del-key').addEventListener('click', () => { pence = Math.floor(pence / 10); refreshDisplay(); });
+  overlay.querySelector('#bgte-del-tx')?.addEventListener('click', async () => {
+    if (!confirm('Delete this transaction?')) return;
+    await db.friendTransactions.delete(existing.id);
+    queueDelete('friendTransactions', existing.id).catch(() => {});
+    overlay.remove();
+    onDone();
+  });
 }
 
 async function openBgRateLogEditor(onDone) {
@@ -2877,7 +2887,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 11:19 GMT (v24)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 12:19 BST (v24)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
