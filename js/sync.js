@@ -1,8 +1,9 @@
 import { db, getSetting, setSetting } from './db.js';
 import {
   auth, firestore, onAuthChange,
-  collection, doc, getDoc, setDoc, getDocs,
+  collection, doc, getDoc, setDoc, getDocs, deleteDoc,
   writeBatch, query, where, serverTimestamp, Timestamp,
+  getCountFromServer,
 } from './firebase.js';
 
 const TABLES = [
@@ -11,8 +12,36 @@ const TABLES = [
   'friendHoldings', 'friendTransactions',
 ];
 
+// Upload order: smallest + most-precious tables first, so that if the Firestore
+// daily write quota runs out mid-upload, the hand-entered data (Bank of Gilulu,
+// accounts, settings) has already landed. `transactions` is mostly auto-generated
+// distribution children and is by far the largest, so it goes last.
+const UPLOAD_ORDER = [
+  'settings', 'friendHoldings', 'accounts', 'categories', 'savingsTargets',
+  'recurringIncome', 'recurringExpenses', 'friendTransactions',
+  'accountSnapshots', 'distributions', 'transactions',
+];
+
+// Firestore rejects any document containing an `undefined` field value, and it
+// rejects the whole batch — so one bad record kills 500 writes. IndexedDB is
+// happy to store undefined, so records must be scrubbed on the way out.
+function sanitize(value) {
+  if (Array.isArray(value)) return value.filter(v => v !== undefined).map(sanitize);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v !== undefined) out[k] = sanitize(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+const errCode = e => e?.code || e?.message || String(e);
+
 // ── State ─────────────────────────────────────────────────────────────────────
 export let syncState = { active: false, error: null };
+export let lastPullErrors = [];
 const _listeners = new Set();
 export const onSync = cb => { _listeners.add(cb); return () => _listeners.delete(cb); };
 const notify = () => _listeners.forEach(cb => cb());
@@ -55,7 +84,7 @@ export async function flushSyncQueue() {
           record = await db[item.tableName].get(Number(item.recordId));
         }
         if (record) {
-          await setDoc(docRef(item.tableName, item.recordId), { ...record, _updatedAt: serverTimestamp() });
+          await setDoc(docRef(item.tableName, item.recordId), { ...sanitize(record), _updatedAt: serverTimestamp() });
         }
       } else if (item.action === 'delete') {
         await setDoc(docRef(item.tableName, item.recordId), { _deleted: true, _updatedAt: serverTimestamp() });
@@ -85,7 +114,7 @@ export async function queueWrite(tableName, id) {
       record = await db[tableName].get(Number(id));
     }
     if (!record) return;
-    await setDoc(docRef(tableName, id), { ...record, _updatedAt: serverTimestamp() });
+    await setDoc(docRef(tableName, id), { ...sanitize(record), _updatedAt: serverTimestamp() });
   } catch (e) {
     // Network error — queue for retry
     await enqueue('write', tableName, id);
@@ -115,6 +144,7 @@ export async function pullFromFirestore(fullPull = false) {
   const lastSyncAt = await getSetting('lastSyncAt');
   const sinceTs = (!fullPull && lastSyncAt) ? Timestamp.fromMillis(lastSyncAt) : null;
   let pulled = 0;
+  const errors = [];
 
   for (const tableName of TABLES) {
     try {
@@ -138,6 +168,7 @@ export async function pullFromFirestore(fullPull = false) {
       if (toDelete.length) await db[tableName].bulkDelete(toDelete);
       pulled += snap.size;
     } catch (e) {
+      errors.push(`${tableName}: ${errCode(e)}`);
       console.warn('Pull failed for', tableName, e.message);
     }
   }
@@ -155,9 +186,29 @@ export async function pullFromFirestore(fullPull = false) {
         await db.settings.put(data);
       }
     }
-  } catch {}
+  } catch (e) {
+    errors.push(`settings: ${errCode(e)}`);
+  }
 
-  await setSetting('lastSyncAt', Date.now());
+  // Only advance the watermark if every table came back cleanly. Advancing it
+  // after a partial failure would permanently skip the records that failed.
+  if (errors.length === 0) {
+    await setSetting('lastSyncAt', Date.now());
+  } else {
+    console.warn('Pull incomplete, watermark not advanced:', errors);
+  }
+  lastPullErrors = errors;
+  return pulled;
+}
+
+// Full restore: ignore the incremental watermark and pull every document down.
+// This is what recovers a device that has been wiped — "Sync now" cannot, because
+// it only ever asks for documents newer than the last successful sync.
+export async function downloadAllFromCloud() {
+  if (!auth.currentUser) throw new Error('Not signed in');
+  await setSetting('lastSyncAt', 0);
+  const pulled = await pullFromFirestore(true);
+  if (lastPullErrors.length) throw new Error(lastPullErrors.join('; '));
   return pulled;
 }
 
@@ -165,47 +216,125 @@ export async function pullFromFirestore(fullPull = false) {
 export async function uploadAllToFirestore(onProgress) {
   if (!auth.currentUser) throw new Error('Not signed in');
   const uid = auth.currentUser.uid;
-  const allTables = [...TABLES, 'settings'];
 
+  // Resume from wherever a previous attempt stopped, so a quota/network failure
+  // doesn't restart at record 0 and burn the whole daily allowance re-writing
+  // documents that already uploaded successfully.
+  let cursor = null;
+  try { cursor = JSON.parse(await getSetting('uploadCursor') || 'null'); } catch {}
+  const startIdx = cursor ? Math.max(0, UPLOAD_ORDER.indexOf(cursor.table)) : 0;
+
+  const counts = {};
   let total = 0;
-  let done = 0;
-  for (const t of allTables) total += await db[t].count();
-  onProgress?.(0, total);
+  for (const t of UPLOAD_ORDER) { counts[t] = await db[t].count(); total += counts[t]; }
 
-  const failed = [];
-  for (const tableName of allTables) {
-    try {
-      const records = await db[tableName].toArray();
-      for (let i = 0; i < records.length; i += 500) {
-        const chunk = records.slice(i, i + 500);
+  // Everything before the resume point is already uploaded
+  let done = 0;
+  for (let i = 0; i < startIdx; i++) done += counts[UPLOAD_ORDER[i]];
+  done += cursor?.offset ?? 0;
+  onProgress?.(done, total, cursor ? `resuming at ${cursor.table}` : '');
+
+  const report = { at: Date.now(), uid, tables: [], stoppedAt: null };
+  let fatal = null;
+
+  for (let ti = startIdx; ti < UPLOAD_ORDER.length && !fatal; ti++) {
+    const tableName = UPLOAD_ORDER[ti];
+    const records = await db[tableName].toArray();
+    const from = (ti === startIdx && cursor) ? (cursor.offset ?? 0) : 0;
+    let uploaded = from;
+    let tableErr = null;
+
+    for (let i = from; i < records.length; i += 500) {
+      const chunk = records.slice(i, i + 500);
+      try {
         const batch = writeBatch(firestore);
+        let n = 0;
         for (const record of chunk) {
-          const id = tableName === 'settings' ? record.key : String(record.id);
-          batch.set(doc(firestore, 'users', uid, tableName, id), {
-            ...record, _updatedAt: serverTimestamp(),
+          const id = tableName === 'settings' ? record.key : record.id;
+          if (id === undefined || id === null || id === '') continue;
+          batch.set(doc(firestore, 'users', uid, tableName, String(id)), {
+            ...sanitize(record), _updatedAt: serverTimestamp(),
           });
+          n++;
         }
-        await batch.commit();
+        if (n > 0) await batch.commit();
+        uploaded = i + chunk.length;
         done += chunk.length;
-        onProgress?.(done, total);
+        onProgress?.(done, total, tableName);
+      } catch (e) {
+        tableErr = errCode(e);
+        // Quota exhaustion / permission denial will hit every subsequent write
+        // too — stop immediately and save the cursor rather than hammering it.
+        if (e?.code === 'resource-exhausted' || e?.code === 'permission-denied' ||
+            e?.code === 'unauthenticated') {
+          fatal = tableErr;
+          report.stoppedAt = { table: tableName, offset: uploaded };
+        }
+        break;
       }
+    }
+
+    report.tables.push({ name: tableName, uploaded, total: records.length, error: tableErr });
+    if (tableErr && !fatal) report.stoppedAt = { table: tableName, offset: uploaded };
+  }
+
+  if (report.stoppedAt) {
+    await setSetting('uploadCursor', JSON.stringify(report.stoppedAt));
+  } else {
+    await setSetting('uploadCursor', '');
+    try {
+      await db.syncQueue.clear();
+      await setDoc(doc(firestore, 'users', uid), { initializedAt: serverTimestamp() }, { merge: true });
+      await setSetting('lastSyncAt', Date.now());
+      await setSetting('firestoreUid', uid);
     } catch (e) {
-      failed.push(tableName);
-      console.warn('uploadAllToFirestore failed for', tableName, e);
+      console.warn('uploadAllToFirestore finalization failed', e);
     }
   }
 
-  // Finalise regardless of partial failure
-  try {
-    await db.syncQueue.clear();
-    await setDoc(doc(firestore, 'users', uid), { initializedAt: serverTimestamp() }, { merge: true });
-    await setSetting('lastSyncAt', Date.now());
-    await setSetting('firestoreUid', uid);
-  } catch (e) {
-    console.warn('uploadAllToFirestore finalization failed', e);
-  }
+  report.totalDocs = total;
+  await setSetting('lastUploadReport', JSON.stringify(report));
 
-  if (failed.length > 0) throw new Error(`Failed tables: ${failed.join(', ')}`);
+  if (fatal) {
+    const hint = fatal === 'resource-exhausted'
+      ? ' — Firestore daily write quota exhausted. Resumes where it stopped when you retry (quota resets ~08:00 UK).'
+      : '';
+    throw new Error(fatal + hint);
+  }
+  const failed = report.tables.filter(t => t.error);
+  if (failed.length) throw new Error(`Failed: ${failed.map(t => `${t.name} (${t.error})`).join(', ')}`);
+  return report;
+}
+
+// ── Verification helpers (cheap: counts cost 1 read per 1000 docs) ────────────
+export async function getCloudCounts() {
+  if (!auth.currentUser) throw new Error('Not signed in');
+  const out = {};
+  for (const t of [...TABLES, 'settings']) {
+    try {
+      const snap = await getCountFromServer(colRef(t));
+      out[t] = snap.data().count;
+    } catch (e) {
+      out[t] = errCode(e);
+    }
+  }
+  return out;
+}
+
+// Single write + read + delete. Proves auth, security rules, network and quota
+// in one go, and surfaces the raw Firebase error code on-device.
+export async function pingFirestore() {
+  if (!auth.currentUser) throw new Error('Not signed in');
+  const ref = doc(firestore, 'users', auth.currentUser.uid, '_diagnostics', 'ping');
+  await setDoc(ref, { at: serverTimestamp(), ua: navigator.userAgent.slice(0, 120) });
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('write succeeded but read-back returned nothing');
+  await deleteDoc(ref).catch(() => {});
+  return true;
+}
+
+export async function getLastUploadReport() {
+  try { return JSON.parse(await getSetting('lastUploadReport') || 'null'); } catch { return null; }
 }
 
 async function isFirestoreInitialized() {

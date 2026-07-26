@@ -1,6 +1,6 @@
 // Pocket Ledger Service Worker
 
-const CACHE = 'pocket-ledger-v29';
+const CACHE = 'pocket-ledger-v30';
 const APP_SHELL = [
   './',
   './index.html',

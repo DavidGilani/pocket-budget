@@ -4,7 +4,7 @@ import { db, initDB, getSetting, setSetting } from './db.js';
 import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays, cycleForDate, monthlyEquivalent, dailyEquivalent, delegate } from './utils.js';
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
 import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
-import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount } from './sync.js';
+import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount, downloadAllFromCloud, getCloudCounts, pingFirestore, getLastUploadReport } from './sync.js';
 
 const state = {
   view: 'balance',
@@ -83,6 +83,62 @@ function showToast(msg) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2200);
+}
+
+// Blocking progress overlay for long sync operations, so a stalled upload is
+// visible on mobile where there is no console to watch.
+function showProgressOverlay(title) {
+  const el = document.createElement('div');
+  el.className = 'sheet-overlay';
+  el.innerHTML = `
+    <div class="sheet" style="padding:24px 20px 32px">
+      <div style="font-size:16px;font-weight:700;margin-bottom:14px;text-align:center">${title}</div>
+      <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">
+        <div id="prog-bar" style="height:100%;width:0%;background:var(--blue);transition:width .2s"></div>
+      </div>
+      <div id="prog-label" style="font-size:12px;color:var(--text-2);text-align:center;margin-top:10px">Starting…</div>
+    </div>`;
+  document.body.appendChild(el);
+  return {
+    update(done, total, label) {
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      const bar = el.querySelector('#prog-bar');
+      const lbl = el.querySelector('#prog-label');
+      if (bar) bar.style.width = pct + '%';
+      if (lbl) lbl.textContent = `${done.toLocaleString()} / ${total.toLocaleString()} records${label ? ' · ' + label : ''}`;
+    },
+    close() { el.remove(); },
+  };
+}
+
+// Per-table result of the last upload, including the raw Firebase error code.
+function showUploadReport(report, errorMsg) {
+  const el = document.createElement('div');
+  el.className = 'sheet-overlay';
+  const rows = (report?.tables ?? []).map(t => {
+    const ok = !t.error && t.uploaded >= t.total;
+    const icon = ok ? '✅' : (t.error ? '❌' : '⚠️');
+    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0">
+      <span>${icon} ${t.name}</span>
+      <span style="color:var(--text-2)">${t.uploaded}/${t.total}${t.error ? ' · ' + t.error : ''}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="screen-title">${errorMsg ? 'Upload incomplete' : 'Upload complete'}</span></div>
+      <div class="sheet-body" style="padding:16px">
+        ${errorMsg ? `<div style="background:rgba(234,67,53,.1);color:#ea4335;padding:10px;border-radius:8px;font-size:12px;margin-bottom:12px;line-height:1.5">${errorMsg}</div>` : ''}
+        <div style="font-size:12px;font-family:monospace;background:var(--bg);padding:12px;border-radius:8px;line-height:1.6">
+          ${rows || '<div style="color:var(--text-2)">No tables processed.</div>'}
+        </div>
+        ${report?.stoppedAt ? `<div style="font-size:11px;color:var(--text-2);margin-top:10px;line-height:1.5">Stopped at <strong>${report.stoppedAt.table}</strong> (record ${report.stoppedAt.offset}). Tapping "Force re-upload" again resumes from here rather than starting over.</div>` : ''}
+        <button class="btn btn-primary" id="rep-close" style="width:100%;margin-top:14px">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+  el.onclick = e => { if (e.target === el) el.remove(); };
+  el.querySelector('#rep-close').onclick = () => el.remove();
 }
 
 async function renderBalance() {
@@ -2823,6 +2879,11 @@ async function renderSettings() {
   const ss = syncState;
   const lastSync = await getSetting('lastSyncAt');
   const pendingCount = await getPendingSyncCount();
+  let resumeNote = '';
+  try {
+    const cur = JSON.parse(await getSetting('uploadCursor') || 'null');
+    if (cur) resumeNote = `<br><span style="color:#ea4335;font-weight:600">Incomplete — will resume at ${cur.table}</span>`;
+  } catch {}
   const syncAgo = lastSync ? (() => {
     const diff = Math.round((Date.now() - lastSync) / 60000);
     if (diff < 1) return 'just now';
@@ -2854,7 +2915,14 @@ async function renderSettings() {
             <span class="settings-row-icon">⬆️</span>
             <div style="flex:1">
               <div class="settings-row-label">Force re-upload from this device</div>
-              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Overwrites cloud with this device's data. Only use on the device with the correct data.</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Overwrites cloud with this device's data. Only use on the device with the correct data.${resumeNote}</div>
+            </div>
+          </div>
+          <div class="settings-row" id="force-download-btn">
+            <span class="settings-row-icon">⬇️</span>
+            <div style="flex:1">
+              <div class="settings-row-label">Re-download everything from cloud</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Full restore. Use on a device that is missing data — "Sync now" only fetches changes since the last sync.</div>
             </div>
           </div>
           <div class="settings-row" id="sign-out-btn" style="color:var(--red)"><span class="settings-row-icon">👋</span><span class="settings-row-label" style="color:var(--red)">Sign out</span></div>
@@ -2909,7 +2977,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 14:30 BST (v29)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 15:10 BST (v30)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2925,7 +2993,11 @@ async function renderSettings() {
     if (!confirm('This will delete ALL local data permanently. Are you sure?')) return;
     if (!confirm('Really? This cannot be undone.')) return;
     await Promise.all([db.transactions.clear(), db.distributions.clear(), db.accountSnapshots.clear(), db.friendTransactions.clear()]);
-    showToast('Data cleared'); navigate('balance');
+    // Reset the incremental watermark so the next sync performs a FULL pull.
+    // Without this, "Sync now" only asks for documents newer than the last sync
+    // and can never restore what was just cleared.
+    await setSetting('lastSyncAt', 0);
+    showToast('Data cleared — use "Re-download everything from cloud" to restore'); navigate('balance');
   };
   const signinBtn = viewContainer.querySelector('#google-signin-btn');
   if (signinBtn) signinBtn.onclick = async () => { try { await signInWithGoogle(); } catch (e) { showToast('Sign-in failed: ' + e.message); } };
@@ -2941,13 +3013,33 @@ async function renderSettings() {
   if (forceUploadBtn) forceUploadBtn.onclick = async () => {
     if (!confirm('This will overwrite cloud data with everything on this device. Use this on the device that has the most complete data. Continue?')) return;
     if (!auth.currentUser) { showToast('Not signed in — please sign in first'); return; }
-    showToast('Uploading all data…');
+    const prog = showProgressOverlay('Uploading to cloud');
     try {
-      await uploadAllToFirestore();
-      showToast('Upload complete — sync on other devices now');
+      const report = await uploadAllToFirestore((done, total, label) => {
+        prog.update(done, total, label);
+      });
+      prog.close();
+      showUploadReport(report, null);
     } catch (e) {
-      showToast('Upload failed: ' + e.message);
+      prog.close();
       console.error('Force upload error:', e);
+      showUploadReport(await getLastUploadReport(), e.message);
+    }
+    renderSettings();
+  };
+  const forceDownloadBtn = viewContainer.querySelector('#force-download-btn');
+  if (forceDownloadBtn) forceDownloadBtn.onclick = async () => {
+    if (!auth.currentUser) { showToast('Not signed in — please sign in first'); return; }
+    if (!confirm('This replaces this device\'s data with everything stored in the cloud. Continue?')) return;
+    const prog = showProgressOverlay('Downloading from cloud');
+    try {
+      const pulled = await downloadAllFromCloud();
+      prog.close();
+      showToast(`Restored ${pulled} record${pulled === 1 ? '' : 's'} from cloud`);
+    } catch (e) {
+      prog.close();
+      showToast('Download failed: ' + e.message);
+      console.error('Force download error:', e);
     }
     renderSettings();
   };
@@ -2962,17 +3054,28 @@ async function renderSettings() {
     const pending = await getPendingSyncCount();
     const overlay = document.createElement('div');
     overlay.className = 'sheet-overlay';
+    const rowsHtml = cloud => Object.entries(counts).map(([t, n]) => {
+      const c = cloud ? cloud[t] : null;
+      const match = cloud && c === n;
+      const cloudCell = cloud === null ? '<span style="color:var(--text-2)">–</span>'
+        : `<span style="color:${match ? '#43a047' : '#ea4335'};font-weight:600">${c}</span>`;
+      return `<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0">
+        <span>${t}</span><span>${n} → ${cloudCell}</span></div>`;
+    }).join('');
     overlay.innerHTML = `
       <div class="sheet">
         <div class="sheet-handle"></div>
         <div class="sheet-header"><span class="screen-title">Diagnostics</span></div>
         <div class="sheet-body" style="padding:16px">
-          <div style="font-size:12px;font-family:monospace;background:var(--bg);padding:12px;border-radius:8px;margin-bottom:12px;word-break:break-all;line-height:1.8">
+          <div style="font-size:12px;font-family:monospace;background:var(--bg);padding:12px;border-radius:8px;margin-bottom:10px;word-break:break-all;line-height:1.7">
             <div><strong>Auth UID:</strong> ${uid}</div>
-            <div style="margin-top:8px"><strong>Local record counts:</strong></div>
-            ${Object.entries(counts).map(([t, n]) => `<div style="padding-left:8px">${t}: ${n}</div>`).join('')}
+            <div style="margin-top:8px"><strong>local → cloud</strong></div>
+            <div id="diag-rows">${rowsHtml(null)}</div>
             <div style="margin-top:8px"><strong>Sync queue pending:</strong> ${pending}</div>
+            <div id="diag-ping" style="margin-top:8px"></div>
           </div>
+          <button class="btn" id="diag-ping-btn" style="width:100%;margin-bottom:8px">Test cloud connection</button>
+          <button class="btn" id="diag-cloud-btn" style="width:100%;margin-bottom:8px">Compare with cloud</button>
           <button class="btn btn-primary" id="diag-close" style="width:100%">Close</button>
         </div>
       </div>
@@ -2980,6 +3083,27 @@ async function renderSettings() {
     document.body.appendChild(overlay);
     overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
     overlay.querySelector('#diag-close').onclick = () => overlay.remove();
+    overlay.querySelector('#diag-ping-btn').onclick = async () => {
+      const out = overlay.querySelector('#diag-ping');
+      out.innerHTML = 'Testing…';
+      try {
+        await pingFirestore();
+        out.innerHTML = '<span style="color:#43a047;font-weight:600">✅ Write + read OK — auth, rules, network and quota all fine</span>';
+      } catch (e) {
+        out.innerHTML = `<span style="color:#ea4335;font-weight:600">❌ ${e.code || e.message}</span>`;
+      }
+    };
+    overlay.querySelector('#diag-cloud-btn').onclick = async () => {
+      const btn = overlay.querySelector('#diag-cloud-btn');
+      btn.textContent = 'Counting…';
+      try {
+        const cloud = await getCloudCounts();
+        overlay.querySelector('#diag-rows').innerHTML = rowsHtml(cloud);
+        btn.textContent = 'Compare with cloud';
+      } catch (e) {
+        btn.textContent = 'Failed: ' + (e.code || e.message);
+      }
+    };
   };
   const signOutBtn = viewContainer.querySelector('#sign-out-btn');
   if (signOutBtn) signOutBtn.onclick = async () => { await signOutUser(); renderSettings(); };
