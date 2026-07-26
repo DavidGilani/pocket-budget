@@ -659,9 +659,16 @@ async function renderTransactions() {
     renderTransactions();
   });
   txnScreen.querySelector('#month-picker-btn')?.addEventListener('click', () => showMonthPicker());
-  delegate(txnScreen, 'click', '.txn-row:not([data-swiped])', (e, el) => {
+  delegate(txnScreen, 'click', '.txn-row:not([data-swiped])', async (e, el) => {
     if (!el.dataset.txnId) return;
-    showTxnMenu(Number(el.dataset.txnId));
+    const id = Number(el.dataset.txnId);
+    const txn = await db.transactions.get(id);
+    if (!txn) return;
+    if (txn.distributionId) {
+      const dist = await db.distributions.get(txn.distributionId);
+      if (dist) { openDistEditor(dist.id, !!dist.isIncome); return; }
+    }
+    openEntry(txn.amount >= 0 ? 'income' : 'expense', txn);
   });
   delegate(txnScreen, 'click', '.txn-delete-zone', async (e, el) => {
     e.stopPropagation();
@@ -2346,11 +2353,9 @@ function bgHoldingName(h) {
   return h.name || h.person || h.holder || h.label || h.account || 'Account #' + h.id;
 }
 
-function bgRatePeriods(h) {
-  if (h.ratePeriods) {
-    try { return JSON.parse(h.ratePeriods); } catch {}
-  }
-  if (h.interestRate != null) return [{ fromDate: '2020-01-01', rate: h.interestRate }];
+async function getGlobalRatePeriods() {
+  const raw = await getSetting('bgRatePeriods');
+  if (raw) { try { return JSON.parse(raw); } catch {} }
   return [];
 }
 
@@ -2385,7 +2390,7 @@ async function renderBankGilulu(activeHoldingId = null) {
     ? holdings.find(h => h.id === activeHoldingId)
     : holdings[0];
 
-  const ratePeriods = holding ? bgRatePeriods(holding) : [];
+  const ratePeriods = await getGlobalRatePeriods();
   const currentRateEntry = [...ratePeriods].sort((a, b) => b.fromDate.localeCompare(a.fromDate))[0];
   const currentRate = currentRateEntry?.rate ?? null;
   const toDate = today();
@@ -2398,6 +2403,14 @@ async function renderBankGilulu(activeHoldingId = null) {
   const totalWithInterest = bgTotalWithInterest(allTxs, ratePeriods, toDate);
   const principalTotal = allTxs.reduce((s, t) => s + t.amount, 0);
   const interestEarned = totalWithInterest - principalTotal;
+
+  // This-year interest: accrued from Feb 1 of current year
+  const feb1 = `${new Date().getFullYear()}-02-01`;
+  const thisYearInterest = allTxs.reduce((sum, t) => {
+    const effectiveStart = t.date > feb1 ? t.date : feb1;
+    if (effectiveStart >= toDate) return sum;
+    return sum + bgInterestOnAmount(t.amount, effectiveStart, ratePeriods, toDate);
+  }, 0);
 
   const displayTxs = [...allTxs].reverse(); // newest first
 
@@ -2427,14 +2440,14 @@ async function renderBankGilulu(activeHoldingId = null) {
             return `<tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
               <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}<br><span style="font-size:10px">${days}d</span></td>
               <td style="padding:8px;text-align:right;font-weight:600;color:${t.amount >= 0 ? '#43a047' : 'var(--coral)'}">${t.amount >= 0 ? '+' : ''}${bgFmt(t.amount)}</td>
-              <td style="padding:8px;text-align:right;color:${interest >= 0 ? '#43a047' : 'var(--coral)'}">+${bgFmt(Math.abs(interest))}</td>
+              <td style="padding:8px;text-align:right;color:${interest >= 0 ? '#43a047' : 'var(--coral)'}">${interest >= 0 ? '+' : ''}${bgFmt(interest)}</td>
               <td style="padding:8px;text-align:right;font-weight:700;color:${totalRow >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(totalRow)}</td>
             </tr>`;
           }).join('')}
           <tr style="border-top:2px solid var(--border);background:var(--bg)">
             <td style="padding:8px;font-weight:700;font-size:12px;color:var(--text-2)">TOTAL</td>
             <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(principalTotal)}</td>
-            <td style="padding:8px;text-align:right;font-weight:700;color:#43a047">+${bgFmt(interestEarned)}</td>
+            <td style="padding:8px;text-align:right;font-weight:700;color:${interestEarned >= 0 ? '#43a047' : 'var(--coral)'};">${interestEarned >= 0 ? '+' : ''}${bgFmt(interestEarned)}</td>
             <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(totalWithInterest)}</td>
           </tr>
         </tbody>
@@ -2483,15 +2496,26 @@ async function renderBankGilulu(activeHoldingId = null) {
               <div style="font-size:14px;font-weight:700">${bgFmt(principalTotal)}</div>
             </div>
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Interest earned</div>
-              <div style="font-size:14px;font-weight:700;color:#43a047">+${bgFmt(interestEarned)}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">This year (Feb 1)</div>
+              <div style="font-size:14px;font-weight:700;color:#43a047">+${bgFmt(thisYearInterest)}</div>
             </div>
             <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
-              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Current rate</div>
-              <div style="font-size:14px;font-weight:700">${currentRate != null ? currentRate + '%' : '—'}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">All time interest</div>
+              <div style="font-size:14px;font-weight:700;color:#43a047">${interestEarned >= 0 ? '+' : ''}${bgFmt(interestEarned)}</div>
             </div>
           </div>
+          <div style="margin-top:14px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:6px;font-weight:600;letter-spacing:.3px">RATE: ${currentRate != null ? currentRate + '% p.a.' : 'not set'}</div>
+          </div>
         </div>
+
+        <!-- Balance over time chart -->
+        ${allTxs.length > 0 ? `
+        <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);padding:14px 12px">
+          <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.4px;margin-bottom:10px">BALANCE OVER TIME</div>
+          <canvas id="bg-chart" height="160"></canvas>
+        </div>
+        ` : ''}
 
         <!-- Transaction table -->
         <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);overflow:hidden;overflow-x:auto">
@@ -2529,7 +2553,7 @@ async function renderBankGilulu(activeHoldingId = null) {
     if (holding) openBgTxEditor(null, holding.id, () => renderBankGilulu(holding.id));
   });
   screen.querySelector('#bg-rate-log-btn')?.addEventListener('click', () => {
-    if (holding) openBgRateLogEditor(holding, () => renderBankGilulu(holding.id));
+    openBgRateLogEditor(() => renderBankGilulu(holding?.id ?? null));
   });
   screen.querySelector('#bg-rename-btn')?.addEventListener('click', () => {
     if (holding) openBgAccountEditor(holding, () => renderBankGilulu());
@@ -2541,6 +2565,35 @@ async function renderBankGilulu(activeHoldingId = null) {
       if (tx) openBgTxEditor(tx, holding.id, () => renderBankGilulu(holding.id));
     });
   });
+
+  // Balance over time chart
+  const bgChartCanvas = screen.querySelector('#bg-chart');
+  if (bgChartCanvas && allTxs.length > 0) {
+    const sortedTxs = [...allTxs].sort((a, b) => a.date.localeCompare(b.date));
+    const chartDates = [...new Set([...sortedTxs.map(t => t.date), toDate])].sort();
+    const chartValues = chartDates.map(d => {
+      const txsUpTo = sortedTxs.filter(t => t.date <= d);
+      return bgTotalWithInterest(txsUpTo, ratePeriods, d);
+    });
+    const range = Math.max(...chartValues) - Math.min(...chartValues);
+    const niceSteps = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
+    const step = niceSteps.find(s => range / s <= 7) ?? 10000;
+    new Chart(bgChartCanvas, {
+      type: 'line',
+      data: {
+        labels: chartDates.map(d => new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })),
+        datasets: [{ data: chartValues, borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.08)', fill: true, tension: 0.3, pointRadius: chartDates.length > 20 ? 2 : 4, pointBackgroundColor: '#1a73e8' }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
+          y: { ticks: { font: { size: 10 }, callback: v => bgFmt(v), stepSize: step }, grid: { color: 'rgba(0,0,0,.06)' } },
+        },
+      },
+    });
+  }
 }
 
 function openBgAccountEditor(existing, onDone) {
@@ -2607,9 +2660,10 @@ function openBgTxEditor(existing, holdingId, onDone) {
     overlay.innerHTML = `
       <div class="sheet">
         <div class="sheet-handle"></div>
-        <div class="sheet-header">
-          <span class="sheet-title">${isNew ? 'New transaction' : 'Edit transaction'}</span>
-          <button class="sheet-close" id="bgte-close">✕</button>
+        <div class="sheet-header" style="display:grid;grid-template-columns:44px 1fr 44px;align-items:center;padding:14px 12px">
+          <button class="sheet-close" id="bgte-close" style="justify-self:start">✕</button>
+          <span class="sheet-title" style="text-align:center">${isNew ? 'New deposit / withdrawal' : 'Edit transaction'}</span>
+          <button id="bgte-save-hdr" style="justify-self:end;background:none;border:none;cursor:pointer;font-size:22px;font-weight:700;color:var(--blue);padding:4px">✓</button>
         </div>
         <div class="sheet-body" style="padding:16px">
           <div class="form-group">
@@ -2630,13 +2684,11 @@ function openBgTxEditor(existing, holdingId, onDone) {
         </div>
       </div>
     `;
-    overlay.querySelector('#bgte-close').onclick = () => overlay.remove();
-    overlay.querySelector('#bgte-amount-display').addEventListener('click', () => {
-      openAmountPad('Transaction amount', amount, val => { amount = val; build(); });
-    });
-    overlay.querySelector('#bgte-save').onclick = async () => {
+
+    async function doSave() {
       const date = overlay.querySelector('#bgte-date').value;
       if (!date) { showToast('Enter a date'); return; }
+      if (amount === 0) { showToast('Enter an amount'); return; }
       if (isNew) {
         const id = await db.friendTransactions.add({ holdingId, date, amount, isInterest: false });
         queueWrite('friendTransactions', id).catch(() => {});
@@ -2646,7 +2698,18 @@ function openBgTxEditor(existing, holdingId, onDone) {
       }
       overlay.remove();
       onDone();
-    };
+    }
+
+    overlay.querySelector('#bgte-close').onclick = () => overlay.remove();
+    overlay.querySelector('#bgte-save-hdr').onclick = doSave;
+    overlay.querySelector('#bgte-amount-display').addEventListener('click', () => {
+      openAmountPad('Transaction amount', amount, val => { amount = val; build(); });
+    });
+    overlay.querySelector('#bgte-date').addEventListener('change', () => {
+      currentDate = overlay.querySelector('#bgte-date').value;
+      if (amount !== 0) doSave();
+    });
+    overlay.querySelector('#bgte-save').onclick = doSave;
     overlay.querySelector('#bgte-del')?.addEventListener('click', async () => {
       if (!confirm('Delete this transaction?')) return;
       await db.friendTransactions.delete(existing.id);
@@ -2661,8 +2724,8 @@ function openBgTxEditor(existing, holdingId, onDone) {
   build();
 }
 
-function openBgRateLogEditor(holding, onDone) {
-  let periods = bgRatePeriods(holding).sort((a, b) => b.fromDate.localeCompare(a.fromDate)); // newest first
+async function openBgRateLogEditor(onDone) {
+  let periods = (await getGlobalRatePeriods()).sort((a, b) => b.fromDate.localeCompare(a.fromDate)); // newest first
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -2723,8 +2786,8 @@ function openBgRateLogEditor(holding, onDone) {
         if (periods[i]) periods[i].fromDate = inp.value;
       });
       const sorted = [...periods].sort((a, b) => b.fromDate.localeCompare(a.fromDate));
-      await db.friendHoldings.update(holding.id, { ratePeriods: JSON.stringify(sorted) });
-      queueWrite('friendHoldings', holding.id).catch(() => {});
+      await setSetting('bgRatePeriods', JSON.stringify(sorted));
+      queueWrite('settings', 'bgRatePeriods').catch(() => {});
       overlay.remove();
       onDone();
       showToast('Interest rate log saved');
@@ -3058,6 +3121,27 @@ async function runDataMigrations() {
           ratePeriods: JSON.stringify([{ fromDate: '2020-01-01', rate: h.interestRate }]),
         });
         queueWrite('friendHoldings', h.id).catch(() => {});
+      }
+    }
+  }
+
+  if (ver < 8) {
+    await setSetting('dataVersion', 8);
+    // Migrate per-holding ratePeriods to a single global setting
+    const existing = await getSetting('bgRatePeriods');
+    if (!existing) {
+      const fh = await db.friendHoldings.toArray();
+      for (const h of fh) {
+        if (h.ratePeriods) {
+          try {
+            const periods = JSON.parse(h.ratePeriods);
+            if (periods.length > 0) {
+              await setSetting('bgRatePeriods', JSON.stringify(periods));
+              queueWrite('settings', 'bgRatePeriods').catch(() => {});
+              break;
+            }
+          } catch {}
+        }
       }
     }
   }

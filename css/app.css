@@ -431,7 +431,7 @@ html, body {
   -webkit-tap-highlight-color: transparent;
 }
 
-.numpad-key:active { background: var(--bg); }
+.numpad-key:active { background: var(--blue); color: #fff; }
 .numpad-key.pressed { background: var(--blue); color: white; }
 .numpad-key.delete { font-size: 18px; color: var(--text-2); }
 .numpad-key.action { background: var(--blue); color: white; font-weight: 600; font-size: 16px; border-radius: 10px; }
@@ -713,7 +713,7 @@ html, body {
 .analysis-section { background: var(--card); margin: 10px 12px; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); padding: 16px; }
 .analysis-section-title { font-size: 13px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
 .pill-btn { font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1.5px solid var(--text-2); background: transparent; color: var(--text-2); cursor: pointer; }
-.pill-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pill-btn.active { background: rgba(26,115,232,0.1); border-color: var(--blue); color: var(--text); font-weight: 800; }
 .chart-wrap { position: relative; height: 200px; }
 
 .cat-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
