@@ -6,8 +6,9 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   initializeFirestore, persistentLocalCache,
-  collection, doc, getDoc, setDoc, getDocs,
+  collection, doc, getDoc, setDoc, getDocs, deleteDoc,
   writeBatch, query, where, serverTimestamp, Timestamp,
+  getCountFromServer,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -45,4 +46,4 @@ export const handleRedirectResult = () => getRedirectResult(auth).catch(() => nu
 export const signOutUser = () => signOut(auth);
 export const onAuthChange = cb => onAuthStateChanged(auth, cb);
 
-export { collection, doc, getDoc, setDoc, getDocs, writeBatch, query, where, serverTimestamp, Timestamp };
+export { collection, doc, getDoc, setDoc, getDocs, deleteDoc, writeBatch, query, where, serverTimestamp, Timestamp, getCountFromServer };
