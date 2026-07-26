@@ -1093,7 +1093,10 @@ async function renderHouseholdBills() {
       <div class="recurring-list">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.05em">RECURRING EXPENSES</div>
-          <button class="btn" id="hb-copy" style="padding:5px 12px;font-size:12px">📋 Copy total</button>
+          <div style="display:flex;gap:6px">
+            <button class="btn" id="hb-copy" style="padding:5px 12px;font-size:12px">📋 Copy total</button>
+            <button class="btn" id="hb-copy-detail" style="padding:5px 12px;font-size:12px">📋 Copy detailed</button>
+          </div>
         </div>
         ${allExpenses.length === 0 ? `<div class="empty-state"><div class="empty-text">No recurring expenses this month</div></div>` : ''}
         ${allExpenses.map(r => {
@@ -1135,6 +1138,13 @@ async function renderHouseholdBills() {
 
   viewContainer.querySelector('#hb-copy').onclick = () => {
     const text = `${monthLabel} — Rich owes ${fmt(richOwes)} for household bills`;
+    navigator.clipboard?.writeText(text).catch(() => {}).finally(() => showToast('Copied!'));
+  };
+  viewContainer.querySelector('#hb-copy-detail').onclick = () => {
+    const lines = allExpenses.filter(r => r.isShared)
+      .map(r => `${r.description} - ${fmt(monthlyAmt(r))}`)
+      .join('\n');
+    const text = `${monthLabel} — Rich owes ${fmt(richOwes)} for household bills\n\n${lines}`;
     navigator.clipboard?.writeText(text).catch(() => {}).finally(() => showToast('Copied!'));
   };
   viewContainer.querySelector('#hb-prev').onclick = () => {
@@ -1566,7 +1576,7 @@ async function renderYearlyTrends() {
 
   // ── Top 5 extra incomes (type='income', grouped by note) ─────────────────
   const incomeByName = {};
-  for (const t of yearTxns.filter(t => t.type === 'income')) {
+  for (const t of yearTxns.filter(t => t.type === 'income' || t.type === 'distributed_income')) {
     const key = (t.note ?? '').trim() || 'Unnamed';
     if (!incomeByName[key]) incomeByName[key] = { total: 0, count: 0 };
     incomeByName[key].total += t.amount;
