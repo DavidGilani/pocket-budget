@@ -185,7 +185,8 @@ async function renderBalance() {
   viewContainer.querySelector('#fab-expense').onclick = () => openEntry('expense');
   viewContainer.querySelector('#balance-menu-btn').onclick = () => navigate('settings');
   viewContainer.querySelector('#balance-cycle-btn').onclick = () => navigate('breakdown');
-  viewContainer.querySelector('#wealth-banner-btn')?.onclick = () => { navigate('netWealth'); };
+  const wealthBannerBtn = viewContainer.querySelector('#wealth-banner-btn');
+  if (wealthBannerBtn) wealthBannerBtn.onclick = () => navigate('netWealth');
 }
 
 async function openEntry(type, existingTxn = null) {
@@ -616,7 +617,7 @@ async function renderTransactions() {
                   `;
                 }).join('')}
               </div>
-              <div class="day-total"><div class="day-total-amount">${fmt(dayTotal)}</div></div>
+              <div class="day-total"><div class="day-total-amount ${dayTotal < 0 ? 'negative' : ''}">${fmt(dayTotal)}</div></div>
             </div>
           `;
         }).join('')}
@@ -2073,7 +2074,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 22:15 (v17)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 22:45 (v18)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2274,12 +2275,12 @@ async function runDataMigrations() {
   }
 
   if (ver < 4) {
+    await setSetting('dataVersion', 4);
     const existing = await db.categories.get(28);
     if (!existing) {
       await db.categories.add({ id: 28, name: 'Misc', icon: '📦', colour: '#9E9E9E', isIncome: false, sortOrder: 13, isArchived: false });
-      try { await queueWrite('categories', 28); } catch {}
+      queueWrite('categories', 28).catch(() => {});
     }
-    await setSetting('dataVersion', 4);
   }
 }
 
