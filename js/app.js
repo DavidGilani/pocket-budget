@@ -189,7 +189,7 @@ async function renderBalance() {
   if (isEvenMonth) {
     const thisMonthSnapshots = await db.accountSnapshots.filter(s => s.date.startsWith(todayMonth)).count();
     if (thisMonthSnapshots === 0) {
-      wealthBanner = `<div class="wealth-banner" id="wealth-banner-btn">📊 Time for your bi-monthly net wealth update — tap to enter</div>`;
+      wealthBanner = `<div class="wealth-banner" id="wealth-banner-btn">📊 Time for your bi-monthly net wealth update – tap to enter</div>`;
     }
   }
 
@@ -249,7 +249,7 @@ async function renderBalance() {
     animateCounter(viewContainer.querySelector('.balance-amount'), prevBal, todayBal, 630);
   }
 
-  // Animate projection bars (always — gives a nice entrance on every load)
+  // Animate projection bars (always – gives a nice entrance on every load)
   requestAnimationFrame(() => requestAnimationFrame(() => {
     viewContainer.querySelectorAll('.proj-bar').forEach(bar => {
       bar.style.transition = 'height 0.675s cubic-bezier(0.34, 1.56, 0.64, 1)';
@@ -349,7 +349,7 @@ async function openEntry(type, existingTxn = null) {
     if (key === '⌫') {
       state.entryPence = Math.floor(state.entryPence / 10);
     } else if (key === '.') {
-      // no-op in smart pence mode — digits auto-fill from right
+      // no-op in smart pence mode – digits auto-fill from right
     } else {
       const next = state.entryPence * 10 + parseInt(key);
       if (next <= 9999999) state.entryPence = next;
@@ -773,7 +773,7 @@ async function showMonthPicker() {
   }
   months.reverse();
 
-  // Compute rolling balance (budget left) for each month — the single source of truth
+  // Compute rolling balance (budget left) for each month – the single source of truth
   const balances = await Promise.all(months.map(async mk => {
     const [y, m] = mk.split('-').map(Number);
     const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`;
@@ -1114,7 +1114,7 @@ async function renderHouseholdBills() {
               </div>
             </label>
             <div style="font-weight:700;font-size:15px;color:${r.isShared ? 'var(--blue)' : 'var(--text-2)'}">
-              ${r.isShared ? fmt(monthly) : '—'}
+              ${r.isShared ? fmt(monthly) : '–'}
             </div>
           </div>`;
         }).join('')}
@@ -1137,14 +1137,14 @@ async function renderHouseholdBills() {
   `;
 
   viewContainer.querySelector('#hb-copy').onclick = () => {
-    const text = `${monthLabel} — Rich owes ${fmt(richOwes)} for household bills`;
+    const text = `${monthLabel} – Rich owes ${fmt(richOwes)} for household bills`;
     navigator.clipboard?.writeText(text).catch(() => {}).finally(() => showToast('Copied!'));
   };
   viewContainer.querySelector('#hb-copy-detail').onclick = () => {
     const lines = allExpenses.filter(r => r.isShared)
       .map(r => `${r.description} - ${fmt(monthlyAmt(r))}`)
       .join('\n');
-    const text = `${monthLabel} — Rich owes ${fmt(richOwes)} for household bills\n\n${lines}`;
+    const text = `${monthLabel} – Rich owes ${fmt(richOwes)} for household bills\n\n${lines}`;
     navigator.clipboard?.writeText(text).catch(() => {}).finally(() => showToast('Copied!'));
   };
   viewContainer.querySelector('#hb-prev').onclick = () => {
@@ -1377,7 +1377,7 @@ async function renderAnalysis() {
           const diff = total - compareVal;
           const diffStr = compareVal > 0
             ? `<span style="font-size:12px;font-weight:600;color:${diff > 0 ? '#e53935' : '#43a047'}">${diff > 0 ? '+' : ''}${fmt(diff)}</span>`
-            : `<span style="font-size:12px;color:var(--text-2)">—</span>`;
+            : `<span style="font-size:12px;color:var(--text-2)">–</span>`;
           return `<div class="cat-bar-row">
             <span class="cat-dot" style="background:${cat?.colour ?? '#ccc'}"></span>
             <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}</span>
@@ -1394,7 +1394,7 @@ async function renderAnalysis() {
     </div>
   `;
 
-  // Rolling balance chart — consistent y-axis intervals
+  // Rolling balance chart – consistent y-axis intervals
   const balValues = rollingData.map(d => d.balance);
   const balRawMin = Math.min(...balValues);
   const balRawMax = Math.max(...balValues);
@@ -1430,7 +1430,7 @@ async function renderAnalysis() {
     },
   });
 
-  // Surplus/loss bar chart — blue positive, orange negative
+  // Surplus/loss bar chart – blue positive, orange negative
   new Chart(viewContainer.querySelector('#chart-surplus').getContext('2d'), {
     type: 'bar',
     data: {
@@ -1565,22 +1565,38 @@ async function renderYearlyTrends() {
   });
 
   // ── Top 5 spends (grouped by note) ───────────────────────────────────────
+  // Distributed expenses count as 1 entry (not one per daily child)
   const spendByName = {};
   for (const t of yearTxns.filter(isExp)) {
     const key = (t.note ?? '').trim() || 'Unnamed';
-    if (!spendByName[key]) spendByName[key] = { total: 0, count: 0, categoryId: t.categoryId };
+    if (!spendByName[key]) spendByName[key] = { total: 0, count: 0, categoryId: t.categoryId, _distIds: new Set() };
     spendByName[key].total += Math.abs(t.amount);
-    spendByName[key].count++;
+    if (t.distributionId) {
+      if (!spendByName[key]._distIds.has(t.distributionId)) {
+        spendByName[key]._distIds.add(t.distributionId);
+        spendByName[key].count++;
+      }
+    } else {
+      spendByName[key].count++;
+    }
   }
   const top5Spends = Object.entries(spendByName).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
 
-  // ── Top 5 extra incomes (type='income', grouped by note) ─────────────────
+  // ── Top 5 extra incomes (grouped by note) ────────────────────────────────
+  // Distributed incomes count as 1 entry (not one per daily child)
   const incomeByName = {};
   for (const t of yearTxns.filter(t => t.type === 'income' || t.type === 'distributed_income')) {
     const key = (t.note ?? '').trim() || 'Unnamed';
-    if (!incomeByName[key]) incomeByName[key] = { total: 0, count: 0 };
+    if (!incomeByName[key]) incomeByName[key] = { total: 0, count: 0, _distIds: new Set() };
     incomeByName[key].total += t.amount;
-    incomeByName[key].count++;
+    if (t.distributionId) {
+      if (!incomeByName[key]._distIds.has(t.distributionId)) {
+        incomeByName[key]._distIds.add(t.distributionId);
+        incomeByName[key].count++;
+      }
+    } else {
+      incomeByName[key].count++;
+    }
   }
   const top5Incomes = Object.entries(incomeByName).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
 
@@ -1605,7 +1621,7 @@ async function renderYearlyTrends() {
 
       <!-- Running savings total -->
       <div class="analysis-section">
-        <div class="analysis-section-title">Running savings total — ${year}</div>
+        <div class="analysis-section-title">Running savings total – ${year}</div>
         <div style="text-align:center;padding:6px 0 12px">
           <div style="font-size:32px;font-weight:800;color:${finalSaved >= 0 ? '#43a047' : '#e53935'}">${fmt(Math.abs(finalSaved))}</div>
           <div style="font-size:12px;color:var(--text-2)">${finalSaved >= 0 ? 'total saved so far' : 'in deficit so far'}</div>
@@ -1633,7 +1649,7 @@ async function renderYearlyTrends() {
               const diff = total - prev;
               const diffStr = prev > 0
                 ? `<span style="font-size:12px;font-weight:600;color:${diff > 0 ? '#e53935' : '#43a047'}">${diff > 0 ? '+' : ''}${fmt(diff)}</span>`
-                : `<span style="font-size:12px;color:var(--text-2)">—</span>`;
+                : `<span style="font-size:12px;color:var(--text-2)">–</span>`;
               return `<div class="cat-bar-row">
                 <span class="cat-dot" style="background:${cat?.colour ?? '#ccc'}"></span>
                 <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}</span>
@@ -1652,13 +1668,13 @@ async function renderYearlyTrends() {
 
       <!-- Variable spending by month: year vs prev year -->
       <div class="analysis-section">
-        <div class="analysis-section-title">Variable spending — ${year} vs ${year - 1}</div>
+        <div class="analysis-section-title">Variable spending – ${year} vs ${year - 1}</div>
         <div class="chart-wrap"><canvas id="chart-yt-varspend"></canvas></div>
       </div>
 
       <!-- Top 5 spends -->
       <div class="analysis-section">
-        <div class="analysis-section-title">Top spending groups — ${year}</div>
+        <div class="analysis-section-title">Top spending groups – ${year}</div>
         ${top5Spends.length === 0
           ? '<div class="empty-state" style="padding:12px 0"><div class="empty-text">No spending data</div></div>'
           : top5Spends.map(([name, d], i) => {
@@ -1677,7 +1693,7 @@ async function renderYearlyTrends() {
       <!-- Top 5 extra incomes -->
       ${top5Incomes.length > 0 ? `
       <div class="analysis-section" style="margin-bottom:80px">
-        <div class="analysis-section-title">Top extra incomes — ${year}</div>
+        <div class="analysis-section-title">Top extra incomes – ${year}</div>
         ${top5Incomes.map(([name, d], i) => `
           <div style="display:flex;align-items:center;gap:10px;padding:10px 0;${i < top5Incomes.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
             <div style="width:36px;height:36px;border-radius:50%;background:#43a04722;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">💰</div>
@@ -2059,8 +2075,8 @@ async function openSavingsSheet() {
 
     function updateStats() {
       const amount = editorPence / 100;
-      const pctIncome = monthlyIncome > 0 ? (amount / monthlyIncome * 100).toFixed(1) : '—';
-      const pctTakeHome = takeHome > 0 ? (amount / takeHome * 100).toFixed(1) : '—';
+      const pctIncome = monthlyIncome > 0 ? (amount / monthlyIncome * 100).toFixed(1) : '–';
+      const pctTakeHome = takeHome > 0 ? (amount / takeHome * 100).toFixed(1) : '–';
       eOverlay.querySelector('#sav-e-stats').innerHTML = `
         <div style="display:flex;justify-content:space-between"><span>Monthly income</span><span>${fmt(monthlyIncome)}</span></div>
         <div style="display:flex;justify-content:space-between"><span>Monthly expenses</span><span>${fmt(monthlyExpenses)}</span></div>
@@ -2291,7 +2307,7 @@ async function renderNetWealth() {
 
   function cellVal(accId, date) {
     const v = snapshotMap[date]?.[accId];
-    return v != null ? fmt2(v) : '—';
+    return v != null ? fmt2(v) : '–';
   }
 
   // Table styles
@@ -2346,7 +2362,7 @@ async function renderNetWealth() {
           <tr>
             <td style="${labelStyle}">Change (vs last Oct)</td>
             ${dates.map(d => {
-              if (!lastOctNet || d === lastOctDate) return `<td style="${colStyle}">—</td>`;
+              if (!lastOctNet || d === lastOctDate) return `<td style="${colStyle}">–</td>`;
               const chg = netByDate[d] - lastOctNet;
               return `<td style="${colStyle};color:${chg >= 0 ? '#43a047' : '#e53935'}">${chg >= 0 ? '+' : ''}${fmt2(chg)}</td>`;
             }).join('')}
@@ -2561,12 +2577,12 @@ async function openWealthSnapshotEditor(existingDate) {
     function accRow(a) {
       const val = amountsByAccId[a.id];
       const isDebt = !a.isAsset;
-      const displayVal = val != null ? fmt(Math.abs(val)) + (val < 0 ? ' (neg)' : '') : '—';
+      const displayVal = val != null ? fmt(Math.abs(val)) + (val < 0 ? ' (neg)' : '') : '–';
       return `<div class="settings-row nw-acc-row" data-acc-id="${a.id}" style="gap:8px;align-items:center;cursor:pointer">
         <div style="flex:1;min-width:0">
           <div style="font-size:14px">${a.name}${isDebt ? ' <span style="font-size:11px;color:var(--text-2)">(debt)</span>' : ''}</div>
         </div>
-        <div class="nw-amount-tap" style="font-size:15px;font-weight:600;color:${val != null && val < 0 ? 'var(--coral)' : 'var(--text)'};min-width:100px;text-align:right">${val != null ? (val < 0 ? '-' : '') + fmt(Math.abs(val)) : '—'}</div>
+        <div class="nw-amount-tap" style="font-size:15px;font-weight:600;color:${val != null && val < 0 ? 'var(--coral)' : 'var(--text)'};min-width:100px;text-align:right">${val != null ? (val < 0 ? '-' : '') + fmt(Math.abs(val)) : '–'}</div>
         <button class="nw-edit-acc-btn" data-acc-id="${a.id}" style="padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-2);font-size:11px;flex-shrink:0">✏️</button>
       </div>`;
     }
@@ -2675,7 +2691,7 @@ async function openWealthSnapshotEditor(existingDate) {
       // Save any new/renamed accounts to DB
       for (const a of editedAccounts) {
         if (a.id < 0) {
-          // New account — add to DB and get real ID
+          // New account – add to DB and get real ID
           const realId = await db.accounts.add({ name: a.name, type: a.type, isAsset: a.isAsset, sortOrder: a.sortOrder, isActive: true });
           const oldId = a.id;
           a.id = realId;
@@ -2798,7 +2814,7 @@ function openInflationOverrideEditor(dates, computedInflation, currentOverrides)
       btn.addEventListener('click', () => {
         const d = btn.dataset.date;
         const cur = overrideValues[d] ?? computedInflation(d);
-        openAmountPad(`Inflation — ${new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}`, cur, val => {
+        openAmountPad(`Inflation – ${new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}`, cur, val => {
           overrideValues[d] = Math.abs(val);
           rebuildRows();
         });
@@ -2968,10 +2984,10 @@ async function renderBankGilulu(activeHoldingId = null) {
           ${tabsHTML()}
         </div>
 
-        <!-- Balance card — screenshot-friendly -->
+        <!-- Balance card – screenshot-friendly -->
         <div style="margin:12px;padding:20px;background:var(--card);border-radius:var(--radius);box-shadow:0 1px 4px rgba(0,0,0,.08)">
           <div style="font-size:12px;color:var(--text-2);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px">
-            Bank of Gilulu — ${bgHoldingName(holding)}
+            Bank of Gilulu – ${bgHoldingName(holding)}
           </div>
           <div style="font-size:36px;font-weight:800;letter-spacing:-1px;color:${totalWithInterest >= 0 ? 'var(--text)' : 'var(--coral)'}">
             ${bgFmt(totalWithInterest)}
@@ -3305,7 +3321,7 @@ async function renderSettings() {
   let resumeNote = '';
   try {
     const cur = JSON.parse(await getSetting('uploadCursor') || 'null');
-    if (cur) resumeNote = `<br><span style="color:#ea4335;font-weight:600">Incomplete — will resume at ${cur.table}</span>`;
+    if (cur) resumeNote = `<br><span style="color:#ea4335;font-weight:600">Incomplete – will resume at ${cur.table}</span>`;
   } catch {}
   const syncAgo = lastSync ? (() => {
     const diff = Math.round((Date.now() - lastSync) / 60000);
@@ -3345,7 +3361,7 @@ async function renderSettings() {
             <span class="settings-row-icon">⬇️</span>
             <div style="flex:1">
               <div class="settings-row-label">Re-download everything from cloud</div>
-              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Full restore. Use on a device that is missing data — "Sync now" only fetches changes since the last sync.</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:1px">Full restore. Use on a device that is missing data – "Sync now" only fetches changes since the last sync.</div>
             </div>
           </div>
           <div class="settings-row" id="sign-out-btn" style="color:var(--red)"><span class="settings-row-icon">👋</span><span class="settings-row-label" style="color:var(--red)">Sign out</span></div>
@@ -3422,7 +3438,7 @@ async function renderSettings() {
     // Without this, "Sync now" only asks for documents newer than the last sync
     // and can never restore what was just cleared.
     await setSetting('lastSyncAt', 0);
-    showToast('Data cleared — use "Re-download everything from cloud" to restore'); navigate('balance');
+    showToast('Data cleared – use "Re-download everything from cloud" to restore'); navigate('balance');
   };
   const signinBtn = viewContainer.querySelector('#google-signin-btn');
   if (signinBtn) signinBtn.onclick = async () => { try { await signInWithGoogle(); } catch (e) { showToast('Sign-in failed: ' + e.message); } };
@@ -3432,13 +3448,13 @@ async function renderSettings() {
     const pushed = await flushSyncQueue();
     await pullFromFirestore();
     await regenerateAllDistributionChildren();
-    showToast(pushed > 0 ? `Synced — pushed ${pushed} pending change${pushed === 1 ? '' : 's'}` : 'Sync complete');
+    showToast(pushed > 0 ? `Synced – pushed ${pushed} pending change${pushed === 1 ? '' : 's'}` : 'Sync complete');
     renderSettings();
   };
   const forceUploadBtn = viewContainer.querySelector('#force-upload-btn');
   if (forceUploadBtn) forceUploadBtn.onclick = async () => {
     if (!confirm('This will overwrite cloud data with everything on this device. Use this on the device that has the most complete data. Continue?')) return;
-    if (!auth.currentUser) { showToast('Not signed in — please sign in first'); return; }
+    if (!auth.currentUser) { showToast('Not signed in – please sign in first'); return; }
     const prog = showProgressOverlay('Uploading to cloud');
     try {
       const report = await uploadAllToFirestore((done, total, label) => {
@@ -3455,7 +3471,7 @@ async function renderSettings() {
   };
   const forceDownloadBtn = viewContainer.querySelector('#force-download-btn');
   if (forceDownloadBtn) forceDownloadBtn.onclick = async () => {
-    if (!auth.currentUser) { showToast('Not signed in — please sign in first'); return; }
+    if (!auth.currentUser) { showToast('Not signed in – please sign in first'); return; }
     if (!confirm('This replaces this device\'s data with everything stored in the cloud. Continue?')) return;
     const prog = showProgressOverlay('Downloading from cloud');
     try {
@@ -3515,7 +3531,7 @@ async function renderSettings() {
       out.innerHTML = 'Testing…';
       try {
         await pingFirestore();
-        out.innerHTML = '<span style="color:#43a047;font-weight:600">✅ Write + read OK — auth, rules, network and quota all fine</span>';
+        out.innerHTML = '<span style="color:#43a047;font-weight:600">✅ Write + read OK – auth, rules, network and quota all fine</span>';
       } catch (e) {
         out.innerHTML = `<span style="color:#ea4335;font-weight:600">❌ ${e.code || e.message}</span>`;
       }
@@ -3692,7 +3708,7 @@ async function runDataMigrations() {
           if (childCount === 0 && dist.startDate && dist.endDate) {
             const children = generateDistributionChildren(dist);
             await db.transactions.bulkAdd(children);
-            // Fire Firestore writes without awaiting — offline persistence retries automatically
+            // Fire Firestore writes without awaiting – offline persistence retries automatically
             const newChildren = await db.transactions.where('distributionId').equals(dist.id).toArray();
             newChildren.forEach(c => queueWrite('transactions', c.id).catch(() => {}));
           }

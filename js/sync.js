@@ -23,7 +23,7 @@ const UPLOAD_ORDER = [
 ];
 
 // Firestore rejects any document containing an `undefined` field value, and it
-// rejects the whole batch — so one bad record kills 500 writes. IndexedDB is
+// rejects the whole batch – so one bad record kills 500 writes. IndexedDB is
 // happy to store undefined, so records must be scrubbed on the way out.
 function sanitize(value) {
   if (Array.isArray(value)) return value.filter(v => v !== undefined).map(sanitize);
@@ -101,13 +101,13 @@ export async function flushSyncQueue() {
 
 // ── Write/Delete a single record to Firestore ─────────────────────────────────
 export async function queueWrite(tableName, id) {
-  // Distribution children are never synced — they're regenerated from distributions.
+  // Distribution children are never synced – they're regenerated from distributions.
   if (tableName === 'transactions') {
     const tx = await db.transactions.get(Number(id));
     if (tx?.distributionId) return;
   }
   if (!auth.currentUser) {
-    // Auth not ready yet — persist locally and flush when auth is restored
+    // Auth not ready yet – persist locally and flush when auth is restored
     await enqueue('write', tableName, id);
     return;
   }
@@ -121,7 +121,7 @@ export async function queueWrite(tableName, id) {
     if (!record) return;
     await setDoc(docRef(tableName, id), { ...sanitize(record), _updatedAt: serverTimestamp() });
   } catch (e) {
-    // Network error — queue for retry
+    // Network error – queue for retry
     await enqueue('write', tableName, id);
     console.debug('queueWrite failed, queued for retry:', tableName, id, e.message);
   }
@@ -211,7 +211,7 @@ export async function pullFromFirestore(fullPull = false) {
 }
 
 // Full restore: ignore the incremental watermark and pull every document down.
-// This is what recovers a device that has been wiped — "Sync now" cannot, because
+// This is what recovers a device that has been wiped – "Sync now" cannot, because
 // it only ever asks for documents newer than the last successful sync.
 export async function downloadAllFromCloud() {
   if (!auth.currentUser) throw new Error('Not signed in');
@@ -249,7 +249,7 @@ export async function uploadAllToFirestore(onProgress) {
   for (let ti = startIdx; ti < UPLOAD_ORDER.length && !fatal; ti++) {
     const tableName = UPLOAD_ORDER[ti];
     let records = await db[tableName].toArray();
-    // Distribution children are regenerated locally from distributions — skip
+    // Distribution children are regenerated locally from distributions – skip
     // them to cut ~92% of write volume and stay inside the free-tier quota.
     if (tableName === 'transactions') records = records.filter(r => !r.distributionId);
     const from = (ti === startIdx && cursor) ? (cursor.offset ?? 0) : 0;
@@ -276,7 +276,7 @@ export async function uploadAllToFirestore(onProgress) {
       } catch (e) {
         tableErr = errCode(e);
         // Quota exhaustion / permission denial will hit every subsequent write
-        // too — stop immediately and save the cursor rather than hammering it.
+        // too – stop immediately and save the cursor rather than hammering it.
         if (e?.code === 'resource-exhausted' || e?.code === 'permission-denied' ||
             e?.code === 'unauthenticated') {
           fatal = tableErr;
@@ -309,7 +309,7 @@ export async function uploadAllToFirestore(onProgress) {
 
   if (fatal) {
     const hint = fatal === 'resource-exhausted'
-      ? ' — Firestore daily write quota exhausted. Resumes where it stopped when you retry (quota resets ~08:00 UK).'
+      ? ' – Firestore daily write quota exhausted. Resumes where it stopped when you retry (quota resets ~08:00 UK).'
       : '';
     throw new Error(fatal + hint);
   }
@@ -379,16 +379,16 @@ export function initSync(onAuthStateChange, afterPull) {
       if (savedUid !== user.uid) {
         // First sign-in on this device
         if (await isFirestoreInitialized()) {
-          // Another device already seeded Firestore — pull everything down
+          // Another device already seeded Firestore – pull everything down
           await pullFromFirestore(true);
           await afterPull?.().catch(e => console.warn('afterPull:', e));
         } else {
-          // This is the first device — push everything up
+          // This is the first device – push everything up
           await uploadAllToFirestore();
         }
         await setSetting('firestoreUid', user.uid);
       } else {
-        // Returning device — pull remote changes, then push any locally queued writes
+        // Returning device – pull remote changes, then push any locally queued writes
         await pullFromFirestore();
         await flushSyncQueue();
         await afterPull?.().catch(e => console.warn('afterPull:', e));
