@@ -63,6 +63,7 @@ async function renderView(view) {
       case 'extraIncomes': await renderExtraIncomes(); break;
       case 'accounts':     await renderAccounts(); break;
       case 'netWealth':    await renderNetWealth(); break;
+      case 'bankGilulu':   await renderBankGilulu(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
       default:             await renderBalance();
@@ -1131,10 +1132,13 @@ async function renderAnalysis() {
           const pct = totalSpend > 0 ? (total / totalSpend * 100) : 0;
           const compareVal = compareMode === 'lastMonth' ? (prevByCat[cid] ?? 0) : (avgByCat[cid] ?? 0);
           const diff = total - compareVal;
-          const diffStr = compareVal > 0 ? `<span style="font-size:11px;color:${diff > 0 ? '#e53935' : '#43a047'};margin-left:4px">${diff > 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))}</span>` : '';
+          const diffStr = compareVal > 0
+            ? `<span style="font-size:12px;font-weight:600;color:${diff > 0 ? '#e53935' : '#43a047'}">${diff > 0 ? '+' : ''}${fmt(diff)}</span>`
+            : `<span style="font-size:12px;color:var(--text-2)">—</span>`;
           return `<div class="cat-bar-row">
-            <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}${diffStr}</span>
-            <div class="cat-bar-track"><div class="cat-bar-fill" style="width:${pct}%;background:${cat?.colour ?? '#ccc'}"></div></div>
+            <span class="cat-dot" style="background:${cat?.colour ?? '#ccc'}"></span>
+            <span class="cat-bar-label">${cat?.icon ?? ''} ${cat?.name ?? 'Other'}</span>
+            <span class="cat-bar-diff">${diffStr}</span>
             <span class="cat-bar-amount">${fmt(total)}</span>
           </div>`;
         }).join('')}
@@ -1690,7 +1694,6 @@ function openAmountPad(title, initialValue, onConfirm, opts = {}) {
     </div>
   `;
   document.body.appendChild(overlay);
-  pence = Math.round(Math.abs(initialValue) * 100);
   render();
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
   overlay.querySelector('#ap-close').onclick = () => overlay.remove();
@@ -2293,6 +2296,381 @@ function openInflationOverrideEditor(dates, computedInflation, currentOverrides)
   };
 }
 
+// ── Bank of Gilulu ────────────────────────────────────────────────────────────
+
+function bgFmt(v) {
+  const abs = Math.abs(v);
+  const str = abs.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (v < 0 ? '-' : '') + '£' + str;
+}
+
+function bgRunningBalance(txs) {
+  // Returns txs augmented with running `balance` field, oldest first
+  let bal = 0;
+  return txs.map(t => { bal += t.amount; return { ...t, balance: bal }; });
+}
+
+async function renderBankGilulu(activeHoldingId = null) {
+  const holdings = await db.friendHoldings.filter(h => h.isActive !== false).toArray();
+
+  // Default to first holding
+  let holding = activeHoldingId
+    ? holdings.find(h => h.id === activeHoldingId)
+    : holdings[0];
+
+  const allTxs = holding
+    ? await db.friendTransactions.where('holdingId').equals(holding.id).sortBy('date')
+    : [];
+  const withBal = bgRunningBalance(allTxs);
+  const currentBalance = withBal.length > 0 ? withBal[withBal.length - 1].balance : 0;
+  const displayTxs = [...withBal].reverse(); // newest first for display
+
+  function tabsHTML() {
+    return holdings.map(h => `
+      <button class="pill-btn${holding && h.id === holding.id ? ' active' : ''}" data-holding-id="${h.id}">${h.name}</button>
+    `).join('') + `<button class="pill-btn" id="bg-add-account">+ Add</button>`;
+  }
+
+  function txTableHTML() {
+    if (displayTxs.length === 0) return `<div style="text-align:center;padding:24px 0;color:var(--text-2);font-size:14px">No transactions yet</div>`;
+    return `
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="border-bottom:1.5px solid var(--border)">
+            <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DATE</th>
+            <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DESCRIPTION</th>
+            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">AMOUNT</th>
+            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">BALANCE</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${displayTxs.map(t => `
+            <tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
+              <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}</td>
+              <td style="padding:8px;color:var(--text)">${t.description || (t.isInterest ? 'Interest' : '—')}</td>
+              <td style="padding:8px;text-align:right;font-weight:600;color:${t.amount >= 0 ? '#43a047' : 'var(--coral)'}">${t.amount >= 0 ? '+' : ''}${bgFmt(t.amount)}</td>
+              <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(t.balance)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen" id="bg-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.navigate('settings')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="screen-title">Bank of Gilulu</span>
+        <button class="icon-btn" id="bg-add-tx-btn" ${!holding ? 'disabled' : ''}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+
+      ${holdings.length === 0 ? `
+        <div class="empty-state">
+          <div class="empty-icon">🏦</div>
+          <div class="empty-title">No accounts yet</div>
+          <div class="empty-text">Add accounts for each person whose money you're holding.</div>
+          <button class="btn btn-primary" id="bg-first-account">Add first account</button>
+        </div>
+      ` : `
+        <!-- Account tabs -->
+        <div style="padding:10px 12px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          ${tabsHTML()}
+        </div>
+
+        <!-- Balance card — screenshot-friendly -->
+        <div style="margin:12px;padding:20px;background:var(--card);border-radius:var(--radius);box-shadow:0 1px 4px rgba(0,0,0,.08)">
+          <div style="font-size:12px;color:var(--text-2);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px">
+            Bank of Gilulu — ${holding?.name ?? ''}
+          </div>
+          <div style="font-size:36px;font-weight:800;letter-spacing:-1px;color:${currentBalance >= 0 ? 'var(--text)' : 'var(--coral)'}">
+            ${bgFmt(currentBalance)}
+          </div>
+          <div style="font-size:12px;color:var(--text-2);margin-top:4px">
+            Current balance · ${new Date().toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}
+          </div>
+          <div style="display:flex;gap:12px;margin-top:14px">
+            <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Interest rate (p.a.)</div>
+              <div style="font-size:15px;font-weight:700;cursor:pointer" id="bg-rate-display">${holding?.interestRate != null ? holding.interestRate + '%' : 'Set rate'}</div>
+            </div>
+            <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Transactions</div>
+              <div style="font-size:15px;font-weight:700">${allTxs.length}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Transaction table -->
+        <div style="margin:0 12px 12px;background:var(--card);border-radius:var(--radius);overflow:hidden;overflow-x:auto">
+          ${txTableHTML()}
+        </div>
+
+        <!-- Add interest button -->
+        ${holding?.interestRate != null ? `
+          <div style="padding:0 12px 12px">
+            <button class="btn" id="bg-add-interest-btn" style="width:100%;border:1.5px dashed var(--border);background:transparent;color:var(--text-2)">
+              + Add interest entry
+            </button>
+          </div>
+        ` : ''}
+      `}
+
+      <div style="padding-bottom:80px"></div>
+    </div>
+  `;
+
+  const screen = viewContainer.querySelector('#bg-screen');
+
+  // First account button
+  screen.querySelector('#bg-first-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
+
+  // Account tabs
+  screen.querySelectorAll('[data-holding-id]').forEach(btn => {
+    btn.addEventListener('click', () => renderBankGilulu(Number(btn.dataset.holdingId)));
+  });
+
+  // Add account tab
+  screen.querySelector('#bg-add-account')?.addEventListener('click', () => {
+    openBgAccountEditor(null, () => renderBankGilulu());
+  });
+
+  // Add transaction
+  screen.querySelector('#bg-add-tx-btn')?.addEventListener('click', () => {
+    if (holding) openBgTxEditor(null, holding.id, () => renderBankGilulu(holding.id));
+  });
+
+  // Edit rate
+  screen.querySelector('#bg-rate-display')?.addEventListener('click', () => {
+    if (!holding) return;
+    openAmountPad('Annual interest rate', holding.interestRate ?? 0, async val => {
+      await db.friendHoldings.update(holding.id, { interestRate: Math.abs(val) });
+      queueWrite('friendHoldings', holding.id).catch(() => {});
+      renderBankGilulu(holding.id);
+    }, { prefix: '', suffix: '%', noNegative: true, decimals: 2 });
+  });
+
+  // Add interest
+  screen.querySelector('#bg-add-interest-btn')?.addEventListener('click', () => {
+    if (!holding) return;
+    openBgAddInterest(holding, currentBalance, withBal, () => renderBankGilulu(holding.id));
+  });
+
+  // Edit/delete transaction
+  screen.querySelectorAll('.bg-tx-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const txId = Number(row.dataset.txId);
+      const tx = allTxs.find(t => t.id === txId);
+      if (tx) openBgTxEditor(tx, holding.id, () => renderBankGilulu(holding.id));
+    });
+  });
+}
+
+function openBgAccountEditor(existing, onDone) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit account' : 'New account'}</span>
+        <button class="sheet-close" id="bgae-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Account holder name</label>
+          <input class="form-input" id="bgae-name" type="text" placeholder="e.g. Dom" value="${existing?.name ?? ''}">
+        </div>
+        <div style="display:flex;gap:8px;padding-top:8px;padding-bottom:24px">
+          ${existing ? `<button class="btn btn-danger" id="bgae-del">Archive</button>` : ''}
+          <button class="btn btn-primary" id="bgae-save" style="flex:1">Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#bgae-close').onclick = () => overlay.remove();
+
+  overlay.querySelector('#bgae-save').onclick = async () => {
+    const name = overlay.querySelector('#bgae-name').value.trim();
+    if (!name) { showToast('Enter a name'); return; }
+    if (existing) {
+      await db.friendHoldings.update(existing.id, { name });
+      queueWrite('friendHoldings', existing.id).catch(() => {});
+    } else {
+      const id = await db.friendHoldings.add({ name, isActive: true, interestRate: null });
+      queueWrite('friendHoldings', id).catch(() => {});
+    }
+    overlay.remove();
+    onDone();
+  };
+
+  overlay.querySelector('#bgae-del')?.addEventListener('click', async () => {
+    if (!confirm(`Archive ${existing.name}?`)) return;
+    await db.friendHoldings.update(existing.id, { isActive: false });
+    queueWrite('friendHoldings', existing.id).catch(() => {});
+    overlay.remove();
+    onDone();
+  });
+}
+
+function openBgTxEditor(existing, holdingId, onDone) {
+  const isNew = !existing;
+  let amount = existing?.amount ?? 0;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+
+  function build() {
+    overlay.innerHTML = `
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">${isNew ? 'New transaction' : 'Edit transaction'}</span>
+          <button class="sheet-close" id="bgte-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:16px">
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input class="form-input" id="bgte-date" type="date" value="${existing?.date ?? today()}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Description</label>
+            <input class="form-input" id="bgte-desc" type="text" placeholder="e.g. Initial deposit" value="${existing?.description ?? ''}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Amount</label>
+            <div class="entry-amount-display" id="bgte-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:${amount < 0 ? 'var(--coral)' : 'var(--text)'}">
+              ${amount >= 0 ? '+' : ''}${bgFmt(amount)}
+            </div>
+            <div style="font-size:12px;color:var(--text-2);margin-top:4px">Positive = deposit, negative = withdrawal</div>
+          </div>
+          <div style="display:flex;gap:8px;padding-top:8px;padding-bottom:24px">
+            ${!isNew ? `<button class="btn btn-danger" id="bgte-del">Delete</button>` : ''}
+            <button class="btn btn-primary" id="bgte-save" style="flex:1">Save</button>
+          </div>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('#bgte-close').onclick = () => overlay.remove();
+    overlay.querySelector('#bgte-amount-display').addEventListener('click', () => {
+      openAmountPad('Transaction amount', amount, val => { amount = val; build(); });
+    });
+    overlay.querySelector('#bgte-save').onclick = async () => {
+      const date = overlay.querySelector('#bgte-date').value;
+      const description = overlay.querySelector('#bgte-desc').value.trim();
+      if (!date) { showToast('Enter a date'); return; }
+      if (isNew) {
+        const id = await db.friendTransactions.add({ holdingId, date, amount, description, isInterest: false });
+        queueWrite('friendTransactions', id).catch(() => {});
+      } else {
+        await db.friendTransactions.update(existing.id, { date, amount, description });
+        queueWrite('friendTransactions', existing.id).catch(() => {});
+      }
+      overlay.remove();
+      onDone();
+    };
+    overlay.querySelector('#bgte-del')?.addEventListener('click', async () => {
+      if (!confirm('Delete this transaction?')) return;
+      await db.friendTransactions.delete(existing.id);
+      queueDelete('friendTransactions', existing.id).catch(() => {});
+      overlay.remove();
+      onDone();
+    });
+  }
+
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  build();
+}
+
+function openBgAddInterest(holding, currentBalance, withBal, onDone) {
+  // Find last interest entry date, or first transaction date
+  const lastInterest = [...withBal].reverse().find(t => t.isInterest);
+  const lastInterestDate = lastInterest?.date;
+  const fromTx = withBal[0];
+  const fromDate = lastInterestDate ?? fromTx?.date ?? today();
+  const toDate = today();
+
+  if (currentBalance <= 0 || !holding.interestRate) {
+    showToast('Set an interest rate first');
+    return;
+  }
+
+  // Compute interest: daily compound from fromDate to toDate on current balance
+  // Simple approach: interest on balance at fromDate point, compounded daily
+  const days = diffDays(fromDate, toDate);
+  const balAtFrom = lastInterest ? lastInterest.balance : (withBal[0]?.balance ?? 0);
+  const interestAmount = balAtFrom > 0
+    ? balAtFrom * (Math.pow(1 + holding.interestRate / 100 / 365, days) - 1)
+    : 0;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Add interest</span>
+        <button class="sheet-close" id="bgai-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div style="background:var(--bg);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--text-2)">
+          <strong style="color:var(--text)">${holding.interestRate}% p.a.</strong> on <strong style="color:var(--text)">${bgFmt(balAtFrom)}</strong><br>
+          From ${new Date(fromDate + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}
+          to ${new Date(toDate + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })} (${days} days)
+        </div>
+        <div class="form-group">
+          <label class="form-label">Interest amount (auto-calculated)</label>
+          <div class="entry-amount-display" id="bgai-amount-display" style="font-size:28px;padding:10px 16px;cursor:pointer;border-radius:var(--radius-sm);border:1.5px solid var(--border);text-align:center;color:#43a047">
+            +${bgFmt(interestAmount)}
+          </div>
+          <div style="font-size:12px;color:var(--text-2);margin-top:4px">Tap to override</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input class="form-input" id="bgai-date" type="date" value="${toDate}">
+        </div>
+        <div style="padding-top:8px;padding-bottom:24px">
+          <button class="btn btn-primary btn-full" id="bgai-save">Add interest entry</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#bgai-close').onclick = () => overlay.remove();
+
+  let overrideAmount = interestAmount;
+  const display = overlay.querySelector('#bgai-amount-display');
+  display.addEventListener('click', () => {
+    openAmountPad('Interest amount', overrideAmount, val => {
+      overrideAmount = Math.abs(val);
+      display.textContent = '+' + bgFmt(overrideAmount);
+    }, { noNegative: true });
+  });
+
+  overlay.querySelector('#bgai-save').onclick = async () => {
+    const date = overlay.querySelector('#bgai-date').value;
+    const id = await db.friendTransactions.add({
+      holdingId: holding.id,
+      date,
+      amount: overrideAmount,
+      description: `Interest (${holding.interestRate}% p.a.)`,
+      isInterest: true,
+    });
+    queueWrite('friendTransactions', id).catch(() => {});
+    overlay.remove();
+    onDone();
+    showToast('Interest added');
+  };
+}
+
 async function renderSettings() {
   const activeSavings = await getSavingsTarget();
   const user = state.currentUser;
@@ -2361,6 +2739,7 @@ async function renderSettings() {
         <div class="settings-section-title">Wealth</div>
         <div class="settings-card">
           <div class="settings-row" id="nav-net-wealth"><span class="settings-row-icon">📊</span><span class="settings-row-label">Net wealth tracker</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-bank-gilulu"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Bank of Gilulu</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -2372,7 +2751,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 00:20 (v21)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 01:00 (v22)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2381,6 +2760,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
+  viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
   viewContainer.querySelector('#clear-btn').onclick = async () => {
