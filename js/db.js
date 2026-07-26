@@ -61,7 +61,7 @@ const SEED_ACCOUNTS = [
   { id:10, name:'APCs',                     type:'pension',    isAsset:true,  sortOrder:10, isActive:true  },
   { id:11, name:'Property',                 type:'property',   isAsset:true,  sortOrder:11, isActive:true  },
   { id:12, name:'Mortgage',                 type:'mortgage',   isAsset:false, sortOrder:12, isActive:true  },
-  { id:13, name:'Bank of Gilulu',           type:'holding',    isAsset:true,  sortOrder:13, isActive:true  },
+  { id:13, name:'Bank of Gilulu',           type:'holding',    isAsset:false, sortOrder:13, isActive:true  },
 ];
 
 async function initDB() {

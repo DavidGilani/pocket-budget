@@ -55,6 +55,8 @@
     </nav>
   </div>
 
+  <!-- Failsafe SW registration — runs even if app.js fails to parse -->
+  <script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'});</script>
   <!-- Dexie for IndexedDB -->
   <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
   <!-- Chart.js -->
