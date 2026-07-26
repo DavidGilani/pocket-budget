@@ -1657,14 +1657,19 @@ function nearestEvenMonthFirst() {
   return `${y}-${String(m).padStart(2, '0')}-01`;
 }
 
-function openAmountPad(title, initialValue, onConfirm) {
-  let pence = Math.round(Math.abs(initialValue) * 100);
-  let negative = initialValue < 0;
+function openAmountPad(title, initialValue, onConfirm, opts = {}) {
+  const { prefix = '£', suffix = '', noNegative = false, decimals = 2 } = opts;
+  let pence = Math.round(Math.abs(initialValue) * Math.pow(10, decimals));
+  let negative = !noNegative && initialValue < 0;
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
   const render = () => {
-    const displayVal = (negative ? '-' : '') + '£' + (pence / 100).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const num = pence / Math.pow(10, decimals);
+    const formatted = decimals > 0
+      ? num.toLocaleString('en-GB', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+      : String(Math.round(num));
+    const displayVal = (negative ? '-' : '') + prefix + formatted + suffix;
     overlay.querySelector('#ap-display').textContent = displayVal;
     overlay.querySelector('#ap-display').style.color = negative ? 'var(--coral)' : 'var(--text)';
   };
@@ -1673,10 +1678,10 @@ function openAmountPad(title, initialValue, onConfirm) {
       <div class="sheet-handle"></div>
       <div class="sheet-header"><span class="sheet-title">${title}</span><button class="sheet-close" id="ap-close">✕</button></div>
       <div class="sheet-body">
-        <div class="entry-amount-display" id="ap-display" style="font-size:32px;padding:12px 20px">£0.00</div>
-        <div style="padding:0 16px 6px">
+        <div class="entry-amount-display" id="ap-display" style="font-size:32px;padding:12px 20px">${prefix}0${suffix}</div>
+        ${noNegative ? '' : `<div style="padding:0 16px 6px">
           <button id="ap-neg-toggle" style="font-size:12px;padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);background:transparent;color:var(--text-2);cursor:pointer">+/− toggle</button>
-        </div>
+        </div>`}
         <div class="numpad">
           ${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k => `<button class="numpad-key ${k==='⌫'?'delete':''}" data-key="${k}">${k}</button>`).join('')}
         </div>
@@ -1689,19 +1694,21 @@ function openAmountPad(title, initialValue, onConfirm) {
   render();
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
   overlay.querySelector('#ap-close').onclick = () => overlay.remove();
-  overlay.querySelector('#ap-neg-toggle').onclick = () => { negative = !negative; render(); };
+  overlay.querySelector('#ap-neg-toggle')?.addEventListener('click', () => { negative = !negative; render(); });
   overlay.querySelectorAll('.numpad-key').forEach(btn => {
     btn.addEventListener('click', () => {
       const k = btn.dataset.key;
       if (k === '⌫') { pence = Math.floor(pence / 10); }
       else if (k !== '.') { pence = pence * 10 + Number(k); }
-      if (pence > 99999999) pence = 99999999;
+      const maxPence = 99999999 * Math.pow(10, decimals - 2);
+      if (pence > maxPence) pence = maxPence;
       render();
     });
   });
   overlay.querySelector('#ap-confirm').onclick = () => {
     overlay.remove();
-    onConfirm(negative ? -(pence / 100) : pence / 100);
+    const scale = Math.pow(10, decimals);
+    onConfirm(negative ? -(pence / scale) : pence / scale);
   };
 }
 
@@ -1914,9 +1921,9 @@ async function renderNetWealth() {
   nwScreen.querySelector('#nw-edit-past-btn')?.addEventListener('click', () => openPastSnapshotPicker(dates));
 
   nwScreen.querySelector('#nw-inflation-rate-row')?.addEventListener('click', () => {
-    openAmountPad('Annual inflation rate (%)', rate, val => {
+    openAmountPad('Annual inflation rate', rate, val => {
       setSetting('inflationRate', Math.min(50, Math.max(0, val))).then(() => renderNetWealth());
-    });
+    }, { prefix: '', suffix: '%', noNegative: true, decimals: 1 });
   });
 
   nwScreen.querySelector('#nw-inflation-override-row')?.addEventListener('click', () => {
@@ -1930,8 +1937,14 @@ async function renderNetWealth() {
   if (dates.length > 1) {
     const allVals = [...chartNetWealth, ...chartCash, ...chartInflation].filter(v => v != null);
     const maxVal = Math.max(...allVals);
-    const minVal = Math.min(...allVals);
-    const pad = Math.max((maxVal - minVal) * 0.1, 500);
+    const minVal = Math.min(0, ...allVals);
+
+    // Pick a nice step size so we get 4-7 evenly spaced ticks
+    const range = maxVal - minVal;
+    const niceSteps = [500, 1000, 2000, 2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000];
+    const stepSize = niceSteps.find(s => range / s <= 7) ?? 500000;
+    const yMin = Math.floor(minVal / stepSize) * stepSize;
+    const yMax = Math.ceil(maxVal / stepSize) * stepSize;
     const yTick = v => Math.abs(v) >= 1000 ? `£${(v/1000).toFixed(0)}k` : `£${v.toFixed(0)}`;
 
     new Chart(viewContainer.querySelector('#chart-nw').getContext('2d'), {
@@ -1948,8 +1961,8 @@ async function renderNetWealth() {
         responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 12, padding: 10 } } },
         scales: {
-          x: { grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
-          y: { min: minVal - pad, max: maxVal + pad, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: yTick } },
+          x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 90, font: { size: 10 } } },
+          y: { min: yMin, max: yMax, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { stepSize, font: { size: 11 }, callback: yTick } },
         },
       },
     });
@@ -2124,7 +2137,9 @@ async function openWealthSnapshotEditor(existingDate) {
     if (existingDate) {
       overlay.querySelector('#nw-e-del').onclick = async () => {
         if (!confirm(`Delete snapshot for ${existingDate}?`)) return;
+        const toDelete = await db.accountSnapshots.filter(s => s.date === existingDate).toArray();
         await db.accountSnapshots.filter(s => s.date === existingDate).delete();
+        toDelete.forEach(r => queueDelete('accountSnapshots', r.id).catch(() => {}));
         overlay.remove();
         renderNetWealth();
         showToast('Snapshot deleted');
@@ -2357,7 +2372,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 23:55 (v20)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 00:20 (v21)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -2570,6 +2585,16 @@ async function runDataMigrations() {
     await setSetting('dataVersion', 5);
     await db.accounts.update(13, { isAsset: false });
     queueWrite('accounts', 13).catch(() => {});
+  }
+
+  if (ver < 6) {
+    await setSetting('dataVersion', 6);
+    // Fix snapshots incorrectly dated 2026-01-01 → should be 2026-02-01
+    const wrongSnaps = await db.accountSnapshots.filter(s => s.date === '2026-01-01').toArray();
+    for (const s of wrongSnaps) {
+      await db.accountSnapshots.update(s.id, { date: '2026-02-01' });
+      queueWrite('accountSnapshots', s.id).catch(() => {});
+    }
   }
 }
 
