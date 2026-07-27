@@ -2823,15 +2823,44 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     return snaps[0]?.balance ?? 0;
   }
 
-  const [txns, allRates, transfers] = await Promise.all([
+  const [txns, allRates, transfers, cycleStartDayRaw] = await Promise.all([
     db.transactions.where('date').between(startDate, endDate, true, true)
       .filter(t => ['expense','income','distributed_expense','distributed_income'].includes(t.type))
       .toArray(),
     db.accountRates.toArray(),
     db.accountTransfers.where('date').between(startDate, endDate, true, true).toArray(),
+    getSetting('cycleStartDay'),
   ]);
 
-  const netTransactions = txns.reduce((s, t) => s + t.amount, 0);
+  const cycleStartDay = cycleStartDayRaw ?? 1;
+
+  // Group transactions by budget cycle period to compute "new savings" per cycle
+  function getCyclePeriods() {
+    const periods = [];
+    const s = new Date(startDate + 'T12:00:00');
+    const e = new Date(endDate + 'T12:00:00');
+    let cycleBegin = new Date(s.getFullYear(), s.getMonth(), cycleStartDay);
+    if (cycleBegin > s) cycleBegin = new Date(s.getFullYear(), s.getMonth() - 1, cycleStartDay);
+    while (cycleBegin <= e) {
+      const nextBegin = new Date(cycleBegin.getFullYear(), cycleBegin.getMonth() + 1, cycleStartDay);
+      const pStart = cycleBegin.toISOString().slice(0, 10);
+      const pEnd = new Date(nextBegin - 86400000).toISOString().slice(0, 10);
+      const clippedStart = pStart < startDate ? startDate : pStart;
+      const clippedEnd   = pEnd   > endDate   ? endDate   : pEnd;
+      if (clippedStart <= endDate && clippedEnd >= startDate) {
+        periods.push({ label: cycleBegin.toLocaleDateString('en-GB', { month: 'long' }), start: clippedStart, end: clippedEnd });
+      }
+      cycleBegin = nextBegin;
+    }
+    return periods;
+  }
+
+  const cyclePeriods = getCyclePeriods();
+  const savingsByPeriod = cyclePeriods.map(p => {
+    const net = txns.filter(t => t.date >= p.start && t.date <= p.end).reduce((s, t) => s + t.amount, 0);
+    return { label: p.label, net };
+  });
+  const totalNewSavings = savingsByPeriod.reduce((s, p) => s + p.net, 0);
 
   function rateAt(accountId, date) {
     return allRates
@@ -2839,7 +2868,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
       .sort((a, b) => b.startDate.localeCompare(a.startDate))[0] ?? null;
   }
 
-  // Savings interest
+  // Savings interest (using opening balance at startDate)
   let savingsInterest = 0;
   const savingsDetails = [];
   for (const acc of accounts) {
@@ -2876,14 +2905,10 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     return accs.reduce((s, a) => s + balanceAt(a.id, endDate) - balanceAt(a.id, startDate), 0);
   }
 
-  const trackableAccs = accounts.filter(a => ['cash','savings','mortgage'].includes(reconcileTypeForAccount(a)));
   const investmentAccs = accounts.filter(a => reconcileTypeForAccount(a) === 'investment');
-
   const actualChange = groupChange(accounts.filter(a => reconcileTypeForAccount(a) !== 'excluded'));
-  const trackableActual = groupChange(trackableAccs);
-  const investmentActual = groupChange(investmentAccs);
 
-  // Investment market returns = actual change minus transfers in/out
+  // Investment market returns = actual investment change minus any transfers in/out
   const enrichedTransfers = transfers.map(t => ({ ...t, fromAcc: accountMap[t.fromAccountId], toAcc: accountMap[t.toAccountId] }));
   const investmentDetails = investmentAccs.map(a => {
     const change = balanceAt(a.id, endDate) - balanceAt(a.id, startDate);
@@ -2892,20 +2917,21 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
       if (t.fromAccountId === a.id) return s - t.amount;
       return s;
     }, 0);
-    return { name: a.name, change, transferred, marketReturn: change - transferred };
+    return { id: a.id, name: a.name, change, transferred, marketReturn: change - transferred };
   }).filter(d => d.change !== 0 || d.transferred !== 0);
 
   const investmentMarketReturn = investmentDetails.reduce((s, d) => s + d.marketReturn, 0);
-  const expectedTrackable = netTransactions + savingsInterest + mortgageCapital;
-  const discrepancy = trackableActual - expectedTrackable;
+  const expectedTotal = totalNewSavings + savingsInterest + mortgageCapital + investmentMarketReturn;
+  const discrepancy = actualChange - expectedTotal;
 
   return {
     startDate, endDate, days,
-    actualChange, trackableActual, investmentActual,
-    netTransactions, savingsInterest, savingsDetails,
+    actualChange,
+    savingsByPeriod, totalNewSavings,
+    savingsInterest, savingsDetails,
     mortgageCapital, mortgageDetails,
-    expectedTrackable, discrepancy,
     investmentMarketReturn, investmentDetails,
+    expectedTotal, discrepancy,
     transfers: enrichedTransfers,
   };
 }
@@ -2914,77 +2940,122 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
   const recon = await calcReconciliation(startDate, endDate, snapshotMap, allSnapshots, accounts);
   const fmtChg = v => `${v >= 0 ? '+' : ''}${fmt(v)}`;
   const clr = v => v >= 0 ? '#43a047' : '#e53935';
-  const rowS = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;';
+  const BD = 'border-bottom:1px solid var(--border);';
+  const rowS = 'display:flex;justify-content:space-between;align-items:flex-start;padding:5px 0;';
   const subS = rowS + 'font-size:13px;color:var(--text-2);';
-  const ind = 'padding-left:12px;';
+  const hdgS = 'font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2);margin-bottom:4px;';
+  const ind = 'padding-left:14px;';
+  const pad = 'padding:12px 14px;';
   const lbl = new Date(startDate + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
             + ' – ' + new Date(endDate + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
 
   const discAbs = Math.abs(recon.discrepancy);
   const discClr = discAbs < 50 ? '#43a047' : (recon.discrepancy < 0 ? '#e53935' : '#ff9800');
   const discNote = discAbs < 50 ? 'Fully accounted for'
-    : recon.discrepancy < 0 ? 'Possible unlogged spending or timing difference'
-    : 'Possible unlogged income or timing difference';
+    : recon.discrepancy > 0 ? 'More wealth gained than expected – possible unlogged income or timing difference'
+    : 'Less wealth gained than expected – possible unlogged spending or timing difference';
 
-  const savingsRows = recon.savingsDetails.map(d =>
-    `<div style="${subS}${ind}"><span>${d.name} (${d.rate}% AER)</span><span>+${fmt(d.interest)}</span></div>`
+  // New savings rows (per budget cycle)
+  const newSavingsRows = recon.savingsByPeriod.map(p =>
+    `<div style="${subS}${ind}"><span>${p.label}</span><span style="color:${clr(p.net)}">${fmtChg(p.net)}</span></div>`
   ).join('');
 
+  // Savings interest rows
+  const savingsRows = recon.savingsDetails.map(d =>
+    `<div style="${subS}${ind}"><span>${d.name} (${d.rate}% AER on ${fmt(d.balance)})</span><span style="color:#43a047">+${fmt(d.interest)}</span></div>`
+  ).join('');
+
+  // Mortgage detail row
   const mortgageRow = recon.mortgageDetails ? `
     <div style="${subS}${ind}">
-      <span>${recon.mortgageDetails.rate}% on £${fmt(recon.mortgageDetails.balance)} · ${recon.days}d</span>
-      <span>interest: –${fmt(recon.mortgageDetails.interest)}</span>
+      <span style="font-size:12px">${recon.mortgageDetails.rate}% on ${fmt(recon.mortgageDetails.balance)} · ${recon.days}d<br>payments ${fmt(recon.mortgageDetails.payments)} − interest ${fmt(recon.mortgageDetails.interest)}</span>
+      <span style="color:#43a047">+${fmt(recon.mortgageDetails.capital)}</span>
     </div>` : '';
 
-  const invRows = recon.investmentDetails.map(d => `
-    <div style="${subS}${ind}">
-      <div><div>${d.name}</div>${d.transferred ? `<div style="font-size:11px">transfers in/out: ${fmtChg(d.transferred)}</div>` : ''}</div>
-      <div style="text-align:right">
-        <div style="color:${clr(d.change)}">${fmtChg(d.change)}</div>
-        ${d.transferred ? `<div style="font-size:11px;color:var(--text-2)">market: ${fmtChg(d.marketReturn)}</div>` : ''}
-      </div>
-    </div>`).join('');
-
-  const txfrRows = recon.transfers.map(t => {
-    const from = t.fromAcc?.name ?? '?';
-    const to = t.toAcc?.name ?? '?';
-    return `<div style="${subS}${ind}"><span>${fmtDate(t.date)} · ${from} → ${to}${t.note ? ` (${t.note})` : ''}</span><span>${fmt(t.amount)}</span></div>`;
+  // Investment rows (with transfers nested)
+  const txfrByAcc = {};
+  for (const t of recon.transfers) {
+    if (t.toAccountId)   (txfrByAcc[t.toAccountId]   ??= []).push({ ...t, dir: +1 });
+    if (t.fromAccountId) (txfrByAcc[t.fromAccountId] ??= []).push({ ...t, dir: -1 });
+  }
+  const invRows = recon.investmentDetails.map(d => {
+    const accTransfers = (txfrByAcc[d.id] ?? []).map(t =>
+      `<div style="${subS}${ind}" style="padding-left:24px"><span style="font-size:12px">${fmtDate(t.date)} ${t.dir > 0 ? 'in from' : 'out to'} ${(t.dir > 0 ? t.fromAcc : t.toAcc)?.name ?? '?'}${t.note ? ' · ' + t.note : ''}</span><span style="font-size:12px">${t.dir > 0 ? '+' : '–'}${fmt(t.amount)}</span></div>`
+    ).join('');
+    return `
+      <div style="${subS}${ind}">
+        <span>${d.name}</span>
+        <div style="text-align:right">
+          <div style="color:${clr(d.marketReturn)}">${fmtChg(d.marketReturn)}</div>
+          ${d.transferred ? `<div style="font-size:11px;color:var(--text-2)">after ${fmtChg(d.transferred)} transfers</div>` : ''}
+        </div>
+      </div>${accTransfers}`;
   }).join('');
+
+  // Standalone transfers (not touching investment accounts)
+  const investmentAccIds = new Set(recon.investmentDetails.map(d => d.id));
+  // All transfers already captured inside invRows above; don't double-list
 
   return `
     <div class="settings-card" style="margin:8px 12px">
-      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2);margin-bottom:6px">RECONCILIATION · ${lbl}</div>
-        <div style="${rowS}font-weight:700">
+
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">Reconciliation · ${lbl}</div>
+        <div style="${rowS}font-weight:700;font-size:15px">
           <span>Actual net wealth change</span>
           <span style="color:${clr(recon.actualChange)}">${fmtChg(recon.actualChange)}</span>
         </div>
       </div>
-      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
-        <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Expected (trackable accounts)</div>
-        ${recon.savingsInterest > 0.01 ? `<div style="${subS}"><span>Savings interest (est.)</span><span style="color:#43a047">+${fmt(recon.savingsInterest)}</span></div>${savingsRows}` : ''}
-        ${recon.mortgageCapital > 0.01 ? `<div style="${subS}"><span>Mortgage capital benefit</span><span style="color:#43a047">+${fmt(recon.mortgageCapital)}</span></div>${mortgageRow}` : ''}
-        <div style="${rowS}padding-top:6px;border-top:1px solid var(--border);font-weight:600">
-          <span>Total expected</span><span style="color:${clr(recon.expectedTrackable)}">${fmtChg(recon.expectedTrackable)}</span>
+
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">New savings (from transactions)</div>
+        ${newSavingsRows}
+        ${recon.savingsByPeriod.length > 1 ? `
+        <div style="${rowS}padding-top:4px;border-top:1px solid var(--border);font-weight:600;font-size:13px">
+          <span>Subtotal</span><span style="color:${clr(recon.totalNewSavings)}">${fmtChg(recon.totalNewSavings)}</span>
+        </div>` : ''}
+      </div>
+
+      ${recon.savingsInterest > 0.01 ? `
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">Savings interest (estimated)</div>
+        ${savingsRows}
+        ${recon.savingsDetails.length > 1 ? `
+        <div style="${rowS}padding-top:4px;border-top:1px solid var(--border);font-weight:600;font-size:13px">
+          <span>Subtotal</span><span style="color:#43a047">+${fmt(recon.savingsInterest)}</span>
+        </div>` : ''}
+      </div>` : ''}
+
+      ${recon.mortgageDetails ? `
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">Mortgage capital benefit</div>
+        ${mortgageRow}
+      </div>` : ''}
+
+      ${recon.investmentDetails.length > 0 ? `
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">Market investments</div>
+        ${invRows}
+        <div style="${rowS}padding-top:4px;border-top:1px solid var(--border);font-weight:600;font-size:13px">
+          <span>Total market return</span><span style="color:${clr(recon.investmentMarketReturn)}">${fmtChg(recon.investmentMarketReturn)}</span>
+        </div>
+      </div>` : ''}
+
+      <div style="${pad}${BD}">
+        <div style="${rowS}font-weight:700;font-size:15px">
+          <span>Total expected</span>
+          <span style="color:${clr(recon.expectedTotal)}">${fmtChg(recon.expectedTotal)}</span>
         </div>
       </div>
-      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
-        <div style="${rowS}font-weight:700"><span>Discrepancy</span><span style="color:${discClr}">${fmtChg(recon.discrepancy)}</span></div>
-        <div style="font-size:12px;color:${discClr};margin-top:2px">${discNote}</div>
+
+      <div style="${pad}">
+        <div style="${rowS}font-weight:700;font-size:15px">
+          <span>Discrepancy</span>
+          <span style="color:${discClr}">${fmtChg(recon.discrepancy)}</span>
+        </div>
+        <div style="font-size:12px;color:${discClr};margin-top:3px">${discNote}</div>
       </div>
-      ${recon.investmentDetails.length > 0 ? `
-        <div style="padding:12px 14px;${recon.transfers.length > 0 ? 'border-bottom:1px solid var(--border);' : ''}">
-          <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Investment returns (market-linked)</div>
-          ${invRows}
-          <div style="${rowS}padding-top:4px;font-weight:600">
-            <span>Total market return</span><span style="color:${clr(recon.investmentMarketReturn)}">${fmtChg(recon.investmentMarketReturn)}</span>
-          </div>
-        </div>` : ''}
-      ${recon.transfers.length > 0 ? `
-        <div style="padding:12px 14px">
-          <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Transfers in period</div>
-          ${txfrRows}
-        </div>` : ''}
+
     </div>`;
 }
 
@@ -3953,7 +4024,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 16:00 BST (v38)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 17:30 BST (v39)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
