@@ -73,6 +73,8 @@ async function renderView(view) {
       case 'accounts':     await renderAccounts(); break;
       case 'netWealth':    await renderNetWealth(); break;
       case 'mortgageFree': await renderMortgageFree(); break;
+      case 'helpToBuy':    await renderHelpToBuy(); break;
+      case 'investments':  await renderInvestments(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
@@ -3624,6 +3626,497 @@ async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
   });
 }
 
+// ── Financial goals: Help to Buy equity buy-back ──────────────────────────────
+// The equity loan is a % of the property still owned by Help to Buy. Interest is
+// charged on that equity value. Buying back a tranche reduces the % owned and so
+// reduces the ongoing interest. Property value / rate are user-editable settings
+// (we don't hardcode personal figures); the "% remaining" is decremented as
+// buy-backs are logged.
+
+async function computeHelpToBuyProjection() {
+  const [payments, propValRaw, eqPctRaw, rateRaw, lastPurchaseRaw, trancheRaw] = await Promise.all([
+    db.helpToBuyPayments.toArray(),
+    getSetting('h2bPropertyValue'),
+    getSetting('h2bEquityPercent'),
+    getSetting('h2bInterestRate'),
+    getSetting('h2bLastPurchaseDate'),
+    getSetting('h2bTranchePercent'),
+  ]);
+
+  const propertyValue = Number(propValRaw) || 0;
+  const equityPercent = eqPctRaw != null ? Number(eqPctRaw) : 20;
+  const rate = rateRaw != null ? Number(rateRaw) : 1.75;
+  const tranchePercent = trancheRaw != null ? Number(trancheRaw) : 10;
+  const lastPurchaseDate = lastPurchaseRaw ?? '2026-02-26';
+
+  const sorted = [...payments].sort((a, b) => a.date.localeCompare(b.date));
+  const equityLoanValue = propertyValue * equityPercent / 100;
+  const monthlyInterest = equityLoanValue * (rate / 100) / 12;
+  const annualInterest = equityLoanValue * (rate / 100);
+  const trancheCost = propertyValue * tranchePercent / 100;
+
+  // Interest saved to date: for each logged buy-back, the monthly interest it
+  // removed × months elapsed since it was made (approximated at current rate/value).
+  const now = new Date();
+  let interestSavedToDate = 0;
+  for (const pmt of sorted) {
+    const pctBought = Number(pmt.percentBought) || 0;
+    if (!pctBought || !propertyValue) continue;
+    const monthlyReduction = propertyValue * (pctBought / 100) * (rate / 100) / 12;
+    const d = new Date(pmt.date + 'T12:00:00');
+    const monthsElapsed = Math.max(0, (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth()));
+    interestSavedToDate += monthlyReduction * monthsElapsed;
+  }
+
+  const totalBoughtBack = sorted.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const totalPctBought = sorted.reduce((s, p) => s + (Number(p.percentBought) || 0), 0);
+
+  return {
+    propertyValue, equityPercent, rate, tranchePercent, lastPurchaseDate,
+    equityLoanValue, monthlyInterest, annualInterest, trancheCost,
+    payments: sorted, interestSavedToDate, totalBoughtBack, totalPctBought,
+    configured: propertyValue > 0,
+  };
+}
+
+async function renderHelpToBuy() {
+  const p = await computeHelpToBuyProjection();
+  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  const row = (label, value, id) => `
+    <div class="settings-row"${id ? ` id="${id}" style="cursor:pointer"` : ''}>
+      <span class="settings-row-label">${label}</span>
+      <span style="margin-left:auto;font-weight:600">${value}</span>
+      ${id ? '<span class="settings-row-chevron">›</span>' : ''}
+    </div>`;
+  const pList = p.payments.slice().reverse().map(pm => `
+    <div class="settings-row htb-op-row" data-id="${pm.id}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${fmt(Number(pm.amount) || 0)}${pm.percentBought ? ` · ${pm.percentBought}%` : ''}</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(pm.date)}${pm.note ? ' · ' + pm.note : ''}</div>
+      </div>
+      <span class="settings-row-chevron">›</span>
+    </div>`).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">${back}<span class="screen-title">Help to Buy</span><div style="width:34px"></div></div>
+
+      <div style="text-align:center;padding:16px 16px 6px">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Equity still owned by Help to Buy</div>
+        <div style="font-size:32px;font-weight:800">${p.equityPercent}%${p.configured ? ` · ${fmt(p.equityLoanValue)}` : ''}</div>
+        ${p.configured
+          ? `<div style="font-size:13px;color:#e53935;margin-top:2px">Costs ${fmt(p.monthlyInterest)}/mo · ${fmt(p.annualInterest)}/yr in interest</div>`
+          : `<div style="font-size:13px;color:var(--text-2);margin-top:4px">Set your property value below to calculate interest</div>`}
+      </div>
+
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Details ${p.configured ? '' : '· tap to set'}</div>
+      <div class="settings-card" style="margin:4px 12px">
+        ${row('Property value', p.propertyValue ? fmt(p.propertyValue) : 'Tap to set', 'htb-propval')}
+        ${row('Equity % remaining', p.equityPercent + '%', 'htb-eqpct')}
+        ${row('Interest rate', p.rate + '%', 'htb-rate')}
+        ${row('Buy-back tranche size', p.tranchePercent + '%' + (p.configured ? ` · ${fmt(p.trancheCost)}` : ''), 'htb-tranche')}
+      </div>
+
+      ${p.configured ? `
+      <div style="padding:0 16px;font-size:12px;color:var(--text-2);line-height:1.5;margin:4px 0 2px">
+        Completing the buy-back would save <b style="color:#43a047">${fmt(p.annualInterest)}/yr</b> in interest.
+      </div>` : ''}
+
+      <div style="padding:12px 12px 8px">
+        <button class="btn btn-primary btn-full" id="htb-log">＋ Log equity buy-back</button>
+      </div>
+
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Buy-backs logged</div>
+      ${p.payments.length > 0 ? `
+      <div class="settings-card" style="margin:4px 12px 0">
+        <div class="settings-row">
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600">Bought back to date</div>
+            <div style="font-size:12px;color:var(--text-2)">${p.totalPctBought}% of property${p.interestSavedToDate > 1 ? ` · est. ${fmt(p.interestSavedToDate)} interest saved` : ''}</div>
+          </div>
+          <span style="font-weight:700;font-size:15px">${fmt(p.totalBoughtBack)}</span>
+        </div>
+      </div>` : ''}
+      ${p.payments.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first buy-back above.</div>`
+        : `<div class="settings-card" style="margin:4px 12px">${pList}</div>`}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const reRender = () => renderHelpToBuy();
+  const editSetting = (title, key, cur, opts, after) => openAmountPad(title, cur, v => {
+    setSetting(key, Math.max(0, v)).then(() => { queueWrite('settings', key).catch(() => {}); after ? after(v) : reRender(); });
+  }, opts);
+
+  viewContainer.querySelector('#htb-propval').onclick = () => editSetting('Property value', 'h2bPropertyValue', p.propertyValue, { noNegative: true });
+  viewContainer.querySelector('#htb-eqpct').onclick = () => editSetting('Equity % remaining', 'h2bEquityPercent', p.equityPercent, { prefix: '', suffix: '%', noNegative: true, decimals: 1 });
+  viewContainer.querySelector('#htb-rate').onclick = () => editSetting('Interest rate', 'h2bInterestRate', p.rate, { prefix: '', suffix: '%', noNegative: true, decimals: 2 });
+  viewContainer.querySelector('#htb-tranche').onclick = () => editSetting('Buy-back tranche size', 'h2bTranchePercent', p.tranchePercent, { prefix: '', suffix: '%', noNegative: true, decimals: 0 });
+  viewContainer.querySelector('#htb-log').onclick = () => openHelpToBuyPaymentEditor(null, reRender, p);
+  viewContainer.querySelectorAll('.htb-op-row').forEach(r => r.onclick = () => {
+    const pm = p.payments.find(x => x.id === Number(r.dataset.id));
+    if (pm) openHelpToBuyPaymentEditor(pm, reRender, p);
+  });
+}
+
+async function openHelpToBuyPaymentEditor(existing, onSaved, proj) {
+  const accounts = await db.accounts.toArray();
+  const property = accounts.find(a => a.type === 'property');
+  const fromAcc = accounts.filter(a => a.type === 'bank' && a.isActive !== false).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))[0]
+               ?? accounts.find(a => a.id === 1);
+
+  let oDate = existing?.date ?? today();
+  let amount = existing?.amount ?? (proj?.trancheCost ?? 0);
+  let percentBought = existing?.percentBought ?? (proj?.tranchePercent ?? 10);
+  let note = existing?.note ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Log'} buy-back</span>
+        <button class="sheet-close" id="hb-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input class="form-input" type="date" id="hb-date" value="${oDate}" max="${today()}">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="hb-amount-row">
+          <label class="form-label">Amount paid</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="hb-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="hb-pct-row">
+          <label class="form-label">% of property bought back</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="hb-pct-disp" style="font-size:16px;font-weight:600">${percentBought}%</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:var(--text-2)">
+          Recorded as a transfer from ${fromAcc?.name ?? 'your current account'} → ${property?.name ?? 'Property'} (equity you now own), and your Help to Buy equity % is reduced by ${percentBought}%.
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="hb-note" value="${note}" placeholder="e.g. Second 10% tranche" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="hb-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="hb-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#hb-close').onclick = () => overlay.remove();
+  overlay.querySelector('#hb-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#hb-note').oninput = e => { note = e.target.value; };
+  overlay.querySelector('#hb-amount-row').onclick = () => openAmountPad('Amount paid', amount, v => { amount = Math.max(0, v); overlay.querySelector('#hb-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
+  overlay.querySelector('#hb-pct-row').onclick = () => openAmountPad('% of property bought back', percentBought, v => { percentBought = Math.max(0, v); overlay.querySelector('#hb-pct-disp').textContent = percentBought + '%'; }, { prefix: '', suffix: '%', noNegative: true, decimals: 1 });
+
+  overlay.querySelector('#hb-save').onclick = async () => {
+    if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
+    const rec = { date: oDate, amount: amount || 0, percentBought: percentBought || 0, note: note.trim() };
+
+    // Keep the linked transfer (current account → property equity) in sync.
+    let transferId = existing?.transferId;
+    if ((amount || 0) > 0 && fromAcc && property) {
+      const tf = { fromAccountId: fromAcc.id, toAccountId: property.id, date: oDate, amount, note: 'Help to Buy buy-back', isRecurring: false };
+      if (transferId) { await db.accountTransfers.update(transferId, tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+      else { transferId = await db.accountTransfers.add(tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+    } else if (transferId) {
+      await db.accountTransfers.delete(transferId); queueDelete('accountTransfers', transferId).catch(() => {}); transferId = null;
+    }
+    rec.transferId = transferId ?? null;
+
+    // Adjust the stored "equity % remaining" by the net change in % bought.
+    const prevPct = Number(existing?.percentBought) || 0;
+    const deltaPct = (percentBought || 0) - prevPct;
+    if (deltaPct !== 0) {
+      const curEq = Number(await getSetting('h2bEquityPercent') ?? proj?.equityPercent ?? 20);
+      await setSetting('h2bEquityPercent', Math.max(0, curEq - deltaPct));
+      queueWrite('settings', 'h2bEquityPercent').catch(() => {});
+    }
+
+    if (existing) {
+      await db.helpToBuyPayments.update(existing.id, rec);
+      queueWrite('helpToBuyPayments', existing.id).catch(() => {});
+    } else {
+      const id = await db.helpToBuyPayments.add(rec);
+      queueWrite('helpToBuyPayments', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'Buy-back updated' : 'Buy-back logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#hb-del')?.addEventListener('click', async () => {
+    if (existing.transferId) { await db.accountTransfers.delete(existing.transferId); queueDelete('accountTransfers', existing.transferId).catch(() => {}); }
+    // Give the bought-back % back to the equity-remaining figure.
+    const restorePct = Number(existing.percentBought) || 0;
+    if (restorePct) {
+      const curEq = Number(await getSetting('h2bEquityPercent') ?? 0);
+      await setSetting('h2bEquityPercent', curEq + restorePct);
+      queueWrite('settings', 'h2bEquityPercent').catch(() => {});
+    }
+    await db.helpToBuyPayments.delete(existing.id);
+    queueDelete('helpToBuyPayments', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Buy-back deleted');
+    onSaved?.();
+  });
+}
+
+// ── Financial goals: investments (ISAs) ───────────────────────────────────────
+// Tracks cash + stocks ISAs: current value, interest/growth rate, this-year
+// contributions (from the contribution log) and total value over time. Logging a
+// contribution also records a transfer (current account → ISA) so it's treated
+// as a transfer in the net-wealth reconciliation, exactly like mortgage/H2B.
+
+async function computeInvestmentsSummary() {
+  const [accounts, snaps, rates, contributions] = await Promise.all([
+    db.accounts.orderBy('sortOrder').toArray(),
+    db.accountSnapshots.toArray(),
+    db.accountRates.toArray(),
+    db.investmentContributions.toArray(),
+  ]);
+  const invAccounts = accounts.filter(a => a.isActive !== false && ['savings', 'investment'].includes(a.type));
+  const invIds = new Set(invAccounts.map(a => a.id));
+
+  // Latest snapshot value per account
+  const snapMap = {}; // { date: { accId: bal } }
+  for (const s of snaps) {
+    if (!snapMap[s.date]) snapMap[s.date] = {};
+    snapMap[s.date][s.accountId] = s.balance ?? 0;
+  }
+  const dates = Object.keys(snapMap).sort();
+  const latestDate = dates[dates.length - 1];
+
+  const t = today();
+  const rateAt = accId => rates
+    .filter(r => r.accountId === accId && r.startDate <= t && (!r.endDate || r.endDate >= t))
+    .sort((a, b) => b.startDate.localeCompare(a.startDate))[0];
+
+  const thisYear = t.slice(0, 4);
+  const perAccount = invAccounts.map(a => {
+    const bal = latestDate ? (snapMap[latestDate]?.[a.id] ?? 0) : 0;
+    const rate = rateAt(a.id)?.rate ?? null;
+    const annualInterest = rate != null ? bal * (rate / 100) : null;
+    const contribThisYear = contributions
+      .filter(c => c.accountId === a.id && (c.date || '').slice(0, 4) === thisYear)
+      .reduce((s, c) => s + (Number(c.amount) || 0), 0);
+    return { id: a.id, name: a.name, type: a.type, balance: bal, rate, annualInterest, contribThisYear };
+  });
+
+  const totalValue = perAccount.reduce((s, a) => s + a.balance, 0);
+  const totalAnnualInterest = perAccount.reduce((s, a) => s + (a.annualInterest || 0), 0);
+  const totalContribThisYear = perAccount.reduce((s, a) => s + a.contribThisYear, 0);
+
+  // Total invested over time (sum across these accounts per snapshot date)
+  const series = dates.map(d => ({
+    date: d,
+    total: invAccounts.reduce((s, a) => s + (snapMap[d]?.[a.id] ?? 0), 0),
+  })).filter(pt => pt.total !== 0);
+
+  // Monthly cost of living target (from recurring expenses), for the FIRE goal line
+  return {
+    invAccounts, perAccount, totalValue, totalAnnualInterest, totalContribThisYear,
+    thisYear, series, latestDate,
+    contributions: [...contributions].sort((a, b) => (b.date || '').localeCompare(a.date || '')),
+  };
+}
+
+function drawInvestmentsChart(canvas, series) {
+  if (!canvas || typeof Chart === 'undefined' || series.length < 2) return;
+  const labels = series.map(pt => new Date(pt.date + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }));
+  if (canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Total invested', data: series.map(pt => pt.total), borderColor: '#43a047', backgroundColor: 'rgba(67,160,71,0.10)', borderWidth: 2.5, fill: true, tension: 0.3, pointRadius: 3 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 90, font: { size: 9 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(0)}k` : `£${v.toFixed(0)}` } },
+      },
+    },
+  });
+}
+
+async function renderInvestments() {
+  const s = await computeInvestmentsSummary();
+  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  const cashAccs = s.perAccount.filter(a => a.type === 'savings');
+  const stockAccs = s.perAccount.filter(a => a.type === 'investment');
+  const acctRow = a => `
+    <div class="settings-row">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${a.name}</div>
+        <div style="font-size:12px;color:var(--text-2)">${a.rate != null ? `${a.rate}% · ${fmt(a.annualInterest)}/yr` : 'no rate set'}${a.contribThisYear ? ` · +${fmt(a.contribThisYear)} in ${s.thisYear}` : ''}</div>
+      </div>
+      <span style="font-weight:600;font-size:15px">${fmt(a.balance)}</span>
+    </div>`;
+  const cList = s.contributions.slice(0, 20).map(c => {
+    const acc = s.perAccount.find(a => a.id === c.accountId);
+    return `
+    <div class="settings-row inv-c-row" data-id="${c.id}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${acc?.name ?? 'ISA'} · ${fmt(Number(c.amount) || 0)}</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(c.date)}${c.note ? ' · ' + c.note : ''}</div>
+      </div>
+      <span class="settings-row-chevron">›</span>
+    </div>`;
+  }).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">${back}<span class="screen-title">Investments</span><div style="width:34px"></div></div>
+
+      <div style="text-align:center;padding:16px 16px 6px">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Total invested</div>
+        <div style="font-size:32px;font-weight:800">${fmt(s.totalValue)}</div>
+        <div style="font-size:13px;color:#43a047;margin-top:2px">Generating ~${fmt(s.totalAnnualInterest)}/yr · ${fmt(s.totalAnnualInterest / 12)}/mo</div>
+      </div>
+
+      ${s.series.length > 1 ? `<div class="chart-wrap" style="height:210px;margin:4px 12px"><canvas id="inv-chart"></canvas></div>` : ''}
+
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Goal</div>
+      <div style="padding:0 16px;font-size:12px;color:var(--text-2);line-height:1.5">
+        The long-term aim is for investment interest to cover your monthly living costs. You're currently generating <b style="color:var(--text)">${fmt(s.totalAnnualInterest / 12)}/mo</b> in interest.
+      </div>
+
+      ${cashAccs.length ? `
+      <div style="padding:12px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Cash ISAs</div>
+      <div class="settings-card" style="margin:4px 12px">${cashAccs.map(acctRow).join('')}</div>` : ''}
+
+      ${stockAccs.length ? `
+      <div style="padding:12px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Stocks ISAs</div>
+      <div class="settings-card" style="margin:4px 12px">${stockAccs.map(acctRow).join('')}</div>` : ''}
+
+      <div style="padding:14px 12px 8px">
+        <button class="btn btn-primary btn-full" id="inv-log">＋ Log contribution</button>
+      </div>
+
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Contributions${s.totalContribThisYear ? ` · ${fmt(s.totalContribThisYear)} in ${s.thisYear}` : ''}</div>
+      ${s.contributions.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None logged yet.</div>`
+        : `<div class="settings-card" style="margin:4px 12px">${cList}</div>`}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const reRender = () => renderInvestments();
+  viewContainer.querySelector('#inv-log').onclick = () => openInvestmentContributionEditor(null, reRender, s);
+  viewContainer.querySelectorAll('.inv-c-row').forEach(r => r.onclick = () => {
+    const c = s.contributions.find(x => x.id === Number(r.dataset.id));
+    if (c) openInvestmentContributionEditor(c, reRender, s);
+  });
+  drawInvestmentsChart(viewContainer.querySelector('#inv-chart'), s.series);
+}
+
+async function openInvestmentContributionEditor(existing, onSaved, summary) {
+  const accounts = await db.accounts.toArray();
+  const invAccounts = accounts.filter(a => a.isActive !== false && ['savings', 'investment'].includes(a.type)).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const fromAcc = accounts.filter(a => a.type === 'bank' && a.isActive !== false).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))[0]
+               ?? accounts.find(a => a.id === 1);
+
+  let accountId = existing?.accountId ?? invAccounts[0]?.id;
+  let oDate = existing?.date ?? today();
+  let amount = existing?.amount ?? 0;
+  let note = existing?.note ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const opts = invAccounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Log'} contribution</span>
+        <button class="sheet-close" id="ic-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Into account</label>
+          <select class="form-input" id="ic-acc">${opts}</select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input class="form-input" type="date" id="ic-date" value="${oDate}" max="${today()}">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="ic-amount-row">
+          <label class="form-label">Amount</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ic-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:var(--text-2)">
+          Recorded as a transfer from ${fromAcc?.name ?? 'your current account'} → the chosen ISA, so it counts as a transfer in your net-wealth reconciliation.
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="ic-note" value="${note}" placeholder="e.g. Monthly ISA top-up" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="ic-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="ic-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#ic-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ic-acc').value = accountId;
+  overlay.querySelector('#ic-acc').onchange = e => { accountId = Number(e.target.value); };
+  overlay.querySelector('#ic-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#ic-note').oninput = e => { note = e.target.value; };
+  overlay.querySelector('#ic-amount-row').onclick = () => openAmountPad('Contribution amount', amount, v => { amount = Math.max(0, v); overlay.querySelector('#ic-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
+
+  overlay.querySelector('#ic-save').onclick = async () => {
+    if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
+    if (!accountId) { showToast('Pick an account'); return; }
+    const rec = { accountId, date: oDate, amount: amount || 0, note: note.trim() };
+
+    let transferId = existing?.transferId;
+    if (fromAcc) {
+      const tf = { fromAccountId: fromAcc.id, toAccountId: accountId, date: oDate, amount, note: 'ISA contribution', isRecurring: false };
+      if (transferId) { await db.accountTransfers.update(transferId, tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+      else { transferId = await db.accountTransfers.add(tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+    }
+    rec.transferId = transferId ?? null;
+
+    if (existing) {
+      await db.investmentContributions.update(existing.id, rec);
+      queueWrite('investmentContributions', existing.id).catch(() => {});
+    } else {
+      const id = await db.investmentContributions.add(rec);
+      queueWrite('investmentContributions', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'Contribution updated' : 'Contribution logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#ic-del')?.addEventListener('click', async () => {
+    if (existing.transferId) { await db.accountTransfers.delete(existing.transferId); queueDelete('accountTransfers', existing.transferId).catch(() => {}); }
+    await db.investmentContributions.delete(existing.id);
+    queueDelete('investmentContributions', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Contribution deleted');
+    onSaved?.();
+  });
+}
+
 async function openAccountRatesEditor() {
   const accounts = (await db.accounts.orderBy('sortOrder').toArray())
     .filter(a => a.isActive !== false && ['savings','mortgage'].includes(reconcileTypeForAccount(a)));
@@ -4397,6 +4890,8 @@ async function renderSettings() {
         <div class="settings-card">
           <div class="settings-row" id="nav-net-wealth"><span class="settings-row-icon">📊</span><span class="settings-row-label">Net wealth tracker</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-mortgage-free"><span class="settings-row-icon">🏡</span><span class="settings-row-label">Mortgage free</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-help-to-buy"><span class="settings-row-icon">🔑</span><span class="settings-row-label">Help to Buy</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-investments"><span class="settings-row-icon">📈</span><span class="settings-row-label">Investments</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -4409,7 +4904,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 00:15 BST (v47)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 01:00 BST (v48)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -4420,6 +4915,8 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
+  viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
+  viewContainer.querySelector('#nav-investments').onclick = () => navigate('investments');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;

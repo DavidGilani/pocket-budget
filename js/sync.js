@@ -10,7 +10,7 @@ const TABLES = [
   'transactions', 'categories', 'recurringIncome', 'recurringExpenses',
   'savingsTargets', 'distributions', 'accounts', 'accountSnapshots',
   'friendHoldings', 'friendTransactions', 'accountRates', 'accountTransfers',
-  'mortgageOverpayments',
+  'mortgageOverpayments', 'helpToBuyPayments', 'investmentContributions',
 ];
 
 // Upload order: smallest + most-precious tables first, so that if the Firestore

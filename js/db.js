@@ -36,6 +36,13 @@ db.version(3).stores({
   mortgageOverpayments: '++id, date',
 });
 
+// Financial goals: Help to Buy equity buy-back log, and investment contribution
+// log. Both mirror the mortgage overpayment pattern.
+db.version(4).stores({
+  helpToBuyPayments:       '++id, date',
+  investmentContributions: '++id, date, accountId',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
