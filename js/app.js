@@ -2410,19 +2410,6 @@ async function renderNetWealth() {
           ${tableHTML}
         </div>
         <div id="nw-reconciliation-panel"></div>
-
-        <div class="settings-section" style="margin-top:12px">
-          <div class="settings-section-title">Financial goals</div>
-          <div class="settings-card">
-            <div class="settings-row" style="cursor:pointer" id="nw-mortgage-free-btn">
-              <span class="settings-row-icon">🏡</span>
-              <span class="settings-row-label">Mortgage free</span>
-              <span id="nw-mortgage-free-sub" style="margin-left:auto;color:var(--text-2);font-size:13px"></span>
-              <span class="settings-row-chevron">›</span>
-            </div>
-          </div>
-        </div>
-
         <div class="settings-card" style="margin:4px 12px 8px">
           <div class="settings-row" style="cursor:pointer" id="nw-edit-past-btn">
             <span class="settings-row-icon">✏️</span>
@@ -2484,11 +2471,6 @@ async function renderNetWealth() {
   nwScreen.querySelector('#nw-edit-past-btn')?.addEventListener('click', () => openPastSnapshotPicker(dates));
   nwScreen.querySelector('#nw-transfers-btn')?.addEventListener('click', () => openTransferListSheet());
   nwScreen.querySelector('#nw-rates-btn')?.addEventListener('click', () => openAccountRatesEditor());
-  nwScreen.querySelector('#nw-mortgage-free-btn')?.addEventListener('click', () => openMortgageFreeSheet());
-  computeMortgageProjection().then(proj => {
-    const sub = nwScreen.querySelector('#nw-mortgage-free-sub');
-    if (sub && proj) sub.textContent = proj.clearDate ? `clear ${proj.clearLabel}` : '';
-  }).catch(() => {});
 
   // Rate expiry warning
   const today = new Date();
@@ -3354,13 +3336,31 @@ async function computeMortgageProjection() {
 
   const totalMine = sortedOver.reduce((s, o) => s + (Number(o.myAmount) || 0), 0);
   const totalRich = sortedOver.reduce((s, o) => s + (Number(o.richAmount) || 0), 0);
+  const totalOverpaid = totalMine + totalRich;
+
+  // Actual interest saved = interest that would have accrued at the mortgage rate
+  // on each overpayment from the day it was made until the projected clear date.
+  // Approximated as: sum of (overpayment × rate × months_remaining / 12).
+  let actualInterestSaved = 0;
+  if (isFinite(monthsToClear)) {
+    const mRate = annualRate / 100 / 12;
+    for (const o of sortedOver) {
+      const oTotal = (Number(o.myAmount) || 0) + (Number(o.richAmount) || 0);
+      if (!oTotal) continue;
+      const oDate2 = new Date(o.date + 'T12:00:00');
+      const mRemaining = Math.max(0, (now.getFullYear() - oDate2.getFullYear()) * 12
+        + (now.getMonth() - oDate2.getMonth()) + monthsToClear);
+      // Simple interest approximation over remaining term
+      actualInterestSaved += oTotal * mRate * mRemaining;
+    }
+  }
 
   return {
     mortgage, annualRate, standardMonthly, myOver, richOver, assumedOver,
     anchorPrincipal, anchorDate, currentPrincipal,
     withOver, withoutOver, interestSaved,
     clearDate, clearLabel, monthsToClear,
-    overpayments: sortedOver, totalMine, totalRich, mSnaps, now, curKey,
+    overpayments: sortedOver, totalMine, totalRich, totalOverpaid, actualInterestSaved, mSnaps, now, curKey,
   };
 }
 
@@ -3368,6 +3368,7 @@ function drawMortgageChart(canvas, p) {
   if (!canvas || typeof Chart === 'undefined') return;
   const now = p.now;
   const curKey = p.curKey;
+  const HIST_START = '2021-06'; // David took sole ownership Jun 2021
 
   const maxLen = Math.max(p.withOver.series.length, p.withoutOver.series.length);
   const cappedLen = Math.min(maxLen, 240);
@@ -3375,15 +3376,23 @@ function drawMortgageChart(canvas, p) {
   let y = now.getFullYear(), m = now.getMonth() + 1;
   for (let i = 0; i < cappedLen; i++) { futureKeys.push(`${y}-${String(m).padStart(2, '0')}`); m++; if (m > 12) { m = 1; y++; } }
 
+  // Only include actual snapshots from Jun 2021 onwards
   const histPairs = p.mSnaps
     .map(s => ({ key: s.date.slice(0, 7), bal: Math.abs(s.balance ?? 0) }))
-    .filter(x => x.key < curKey);
+    .filter(x => x.key >= HIST_START && x.key < curKey);
 
-  const seen = new Set();
+  // Build a dense month-by-month label list from HIST_START to end of projection
+  const allKeys = new Set([...histPairs.map(x => x.key), ...futureKeys]);
+  const minKey = HIST_START;
+  const maxKey = futureKeys[futureKeys.length - 1] ?? curKey;
   const labels = [];
-  for (const k of [...histPairs.map(x => x.key), ...futureKeys]) {
-    if (!seen.has(k)) { seen.add(k); labels.push(k); }
+  let ky = +HIST_START.slice(0, 4), km = +HIST_START.slice(5, 7);
+  const [endY, endM] = maxKey.split('-').map(Number);
+  while (ky < endY || (ky === endY && km <= endM)) {
+    labels.push(`${ky}-${String(km).padStart(2, '0')}`);
+    km++; if (km > 12) { km = 1; ky++; }
   }
+
   const idx = Object.fromEntries(labels.map((k, i) => [k, i]));
 
   const withData = labels.map(() => null);
@@ -3397,7 +3406,8 @@ function drawMortgageChart(canvas, p) {
   const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const dispLabels = labels.map(k => {
     const [yy, mm] = k.split('-');
-    return mm === '01' ? `${MON[+mm]} ${yy.slice(2)}` : '';
+    // Show label at Jan of each year and at the very first month
+    return (mm === '01' || k === HIST_START) ? `${MON[+mm]} ${yy.slice(2)}` : '';
   });
 
   if (canvas._chart) canvas._chart.destroy();
@@ -3471,17 +3481,28 @@ async function openMortgageFreeSheet() {
               : `<div style="font-size:13px;color:#e53935;margin-top:2px">Payments don't currently cover the interest</div>`}
           </div>
           <div class="chart-wrap" style="height:210px;margin:4px 12px"><canvas id="mf-chart"></canvas></div>
-          <div class="settings-card" style="margin:8px 12px">
+          <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Projected savings</div>
+          <div class="settings-card" style="margin:4px 12px">
             ${row('Interest rate', p.annualRate + '%')}
             ${row('Standard payment', fmt(p.standardMonthly) + '/mo')}
             ${row('Your monthly overpayment', fmt(p.myOver) + '/mo', 'mf-my-over')}
             ${row("Rich's monthly overpayment", fmt(p.richOver) + '/mo', 'mf-rich-over')}
-            ${row('Interest saved by overpaying', fmt(p.interestSaved))}
+            ${row('Projected interest saved', fmt(p.interestSaved))}
           </div>
-          <div style="padding:0 12px">
+          <div style="padding:12px 12px 8px">
             <button class="btn btn-primary btn-full" id="mf-log">＋ Log overpayment</button>
           </div>
-          <div style="padding:14px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Logged overpayments</div>
+          <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Logged overpayments</div>
+          ${p.overpayments.length > 0 ? `
+          <div class="settings-card" style="margin:4px 12px 0">
+            <div class="settings-row">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:600">Total overpaid to date</div>
+                <div style="font-size:12px;color:var(--text-2)">Your ${fmt(p.totalMine)} + Rich's ${fmt(p.totalRich)}${p.actualInterestSaved > 1 ? ` · est. ${fmt(p.actualInterestSaved)} interest saved` : ''}</div>
+              </div>
+              <span style="font-weight:700;font-size:15px">${fmt(p.totalOverpaid)}</span>
+            </div>
+          </div>` : ''}
           ${p.overpayments.length === 0
             ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first overpayment above.</div>`
             : `<div class="settings-card" style="margin:4px 12px">${oList}</div>`}
@@ -4350,6 +4371,7 @@ async function renderSettings() {
         <div class="settings-card">
           <div class="settings-row" id="nav-rec-income"><span class="settings-row-icon">💵</span><span class="settings-row-label">Recurring income</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-extra-incomes"><span class="settings-row-icon">💰</span><span class="settings-row-label">Extra incomes</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-bank-gilulu"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Bank of Gilulu</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -4367,10 +4389,10 @@ async function renderSettings() {
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-section-title">Wealth</div>
+        <div class="settings-section-title">Financial goals</div>
         <div class="settings-card">
           <div class="settings-row" id="nav-net-wealth"><span class="settings-row-icon">📊</span><span class="settings-row-label">Net wealth tracker</span><span class="settings-row-chevron">›</span></div>
-          <div class="settings-row" id="nav-bank-gilulu"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Bank of Gilulu</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-mortgage-free"><span class="settings-row-icon">🏡</span><span class="settings-row-label">Mortgage free</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -4383,7 +4405,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 23:15 BST (v45)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 23:45 BST (v46)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -4393,6 +4415,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
+  viewContainer.querySelector('#nav-mortgage-free').onclick = () => openMortgageFreeSheet();
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
