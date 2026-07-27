@@ -2823,44 +2823,40 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     return snaps[0]?.balance ?? 0;
   }
 
-  const [txns, allRates, transfers, cycleStartDayRaw] = await Promise.all([
-    db.transactions.where('date').between(startDate, endDate, true, true)
-      .filter(t => ['expense','income','distributed_expense','distributed_income'].includes(t.type))
-      .toArray(),
+  const [allRates, transfers, cycleStartDayRaw, savingsAmountRaw] = await Promise.all([
     db.accountRates.toArray(),
     db.accountTransfers.where('date').between(startDate, endDate, true, true).toArray(),
     getSetting('cycleStartDay'),
+    getSetting('savingsAmount'),
   ]);
 
   const cycleStartDay = cycleStartDayRaw ?? 1;
+  const savingsAmount = savingsAmountRaw ?? 0;
 
-  // Group transactions by budget cycle period to compute "new savings" per cycle
-  function getCyclePeriods() {
-    const periods = [];
-    const s = new Date(startDate + 'T12:00:00');
-    const e = new Date(endDate + 'T12:00:00');
-    let cycleBegin = new Date(s.getFullYear(), s.getMonth(), cycleStartDay);
-    if (cycleBegin > s) cycleBegin = new Date(s.getFullYear(), s.getMonth() - 1, cycleStartDay);
-    while (cycleBegin <= e) {
+  // Complete budget cycles fully within [startDate, endDate]
+  function getCompleteCycles() {
+    const cycles = [];
+    const sDate = new Date(startDate + 'T12:00:00');
+    const eDate = new Date(endDate + 'T12:00:00');
+    // First cycle start on or after startDate
+    let y = sDate.getFullYear(), m = sDate.getMonth();
+    let cycleBegin = new Date(y, m, cycleStartDay);
+    if (cycleBegin < sDate) cycleBegin = new Date(y, m + 1, cycleStartDay);
+    while (cycleBegin < eDate) {
       const nextBegin = new Date(cycleBegin.getFullYear(), cycleBegin.getMonth() + 1, cycleStartDay);
-      const pStart = cycleBegin.toISOString().slice(0, 10);
-      const pEnd = new Date(nextBegin - 86400000).toISOString().slice(0, 10);
-      const clippedStart = pStart < startDate ? startDate : pStart;
-      const clippedEnd   = pEnd   > endDate   ? endDate   : pEnd;
-      if (clippedStart <= endDate && clippedEnd >= startDate) {
-        periods.push({ label: cycleBegin.toLocaleDateString('en-GB', { month: 'long' }), start: clippedStart, end: clippedEnd });
+      const cycleEnd = new Date(nextBegin.getTime() - 86400000);
+      if (cycleEnd < eDate) {
+        cycles.push({ label: cycleBegin.toLocaleDateString('en-GB', { month: 'long' }) });
       }
       cycleBegin = nextBegin;
     }
-    return periods;
+    return cycles;
   }
 
-  const cyclePeriods = getCyclePeriods();
-  const savingsByPeriod = cyclePeriods.map(p => {
-    const net = txns.filter(t => t.date >= p.start && t.date <= p.end).reduce((s, t) => s + t.amount, 0);
-    return { label: p.label, net };
-  });
-  const totalNewSavings = savingsByPeriod.reduce((s, p) => s + p.net, 0);
+  // Expected savings = planned savings amount per complete cycle
+  const completeCycles = getCompleteCycles();
+  const savingsByPeriod = completeCycles.map(c => ({ label: c.label, net: savingsAmount }));
+  const totalNewSavings = savingsAmount * completeCycles.length;
 
   function rateAt(accountId, date) {
     return allRates
@@ -2882,21 +2878,18 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     savingsDetails.push({ name: acc.name, balance: bal, rate: rate.rate, interest });
   }
 
-  // Mortgage capital benefit
-  let mortgageCapital = 0;
+  // Mortgage interest COST (negative: interest accruing is a wealth drain)
+  let mortgageInterestCost = 0;
   let mortgageDetails = null;
   for (const acc of accounts) {
     if (reconcileTypeForAccount(acc) !== 'mortgage') continue;
     const bal = Math.abs(balanceAt(acc.id, startDate));
     if (!bal) continue;
     const rate = rateAt(acc.id, startDate);
-    if (!rate?.monthlyPayment) continue;
-    const months = days / 30.4375;
+    if (!rate) continue;
     const interest = bal * (rate.rate / 100) * (days / 365);
-    const payments = rate.monthlyPayment * months;
-    const capital = Math.max(0, payments - interest);
-    mortgageCapital += capital;
-    mortgageDetails = { name: acc.name, balance: bal, rate: rate.rate, payments, interest, capital };
+    mortgageInterestCost -= interest; // negative
+    mortgageDetails = { name: acc.name, balance: bal, rate: rate.rate, interestCost: interest };
   }
 
   const accountMap = Object.fromEntries(accounts.map(a => [a.id, a]));
@@ -2921,7 +2914,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   }).filter(d => d.change !== 0 || d.transferred !== 0);
 
   const investmentMarketReturn = investmentDetails.reduce((s, d) => s + d.marketReturn, 0);
-  const expectedTotal = totalNewSavings + savingsInterest + mortgageCapital + investmentMarketReturn;
+  const expectedTotal = totalNewSavings + savingsInterest + mortgageInterestCost + investmentMarketReturn;
   const discrepancy = actualChange - expectedTotal;
 
   return {
@@ -2929,7 +2922,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     actualChange,
     savingsByPeriod, totalNewSavings,
     savingsInterest, savingsDetails,
-    mortgageCapital, mortgageDetails,
+    mortgageInterestCost, mortgageDetails,
     investmentMarketReturn, investmentDetails,
     expectedTotal, discrepancy,
     transfers: enrichedTransfers,
@@ -2965,36 +2958,22 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
     `<div style="${subS}${ind}"><span>${d.name} (${d.rate}% AER on ${fmt(d.balance)})</span><span style="color:#43a047">+${fmt(d.interest)}</span></div>`
   ).join('');
 
-  // Mortgage detail row
+  // Mortgage interest cost row (negative)
   const mortgageRow = recon.mortgageDetails ? `
     <div style="${subS}${ind}">
-      <span style="font-size:12px">${recon.mortgageDetails.rate}% on ${fmt(recon.mortgageDetails.balance)} · ${recon.days}d<br>payments ${fmt(recon.mortgageDetails.payments)} − interest ${fmt(recon.mortgageDetails.interest)}</span>
-      <span style="color:#43a047">+${fmt(recon.mortgageDetails.capital)}</span>
+      <span>${recon.mortgageDetails.rate}% AER on ${fmt(recon.mortgageDetails.balance)} · ${recon.days}d</span>
+      <span style="color:#e53935">–${fmt(recon.mortgageDetails.interestCost)}</span>
     </div>` : '';
 
-  // Investment rows (with transfers nested)
-  const txfrByAcc = {};
-  for (const t of recon.transfers) {
-    if (t.toAccountId)   (txfrByAcc[t.toAccountId]   ??= []).push({ ...t, dir: +1 });
-    if (t.fromAccountId) (txfrByAcc[t.fromAccountId] ??= []).push({ ...t, dir: -1 });
-  }
-  const invRows = recon.investmentDetails.map(d => {
-    const accTransfers = (txfrByAcc[d.id] ?? []).map(t =>
-      `<div style="${subS}${ind}" style="padding-left:24px"><span style="font-size:12px">${fmtDate(t.date)} ${t.dir > 0 ? 'in from' : 'out to'} ${(t.dir > 0 ? t.fromAcc : t.toAcc)?.name ?? '?'}${t.note ? ' · ' + t.note : ''}</span><span style="font-size:12px">${t.dir > 0 ? '+' : '–'}${fmt(t.amount)}</span></div>`
-    ).join('');
-    return `
-      <div style="${subS}${ind}">
-        <span>${d.name}</span>
-        <div style="text-align:right">
-          <div style="color:${clr(d.marketReturn)}">${fmtChg(d.marketReturn)}</div>
-          ${d.transferred ? `<div style="font-size:11px;color:var(--text-2)">after ${fmtChg(d.transferred)} transfers</div>` : ''}
-        </div>
-      </div>${accTransfers}`;
-  }).join('');
-
-  // Standalone transfers (not touching investment accounts)
-  const investmentAccIds = new Set(recon.investmentDetails.map(d => d.id));
-  // All transfers already captured inside invRows above; don't double-list
+  // Investment rows — summary only (no per-transfer detail rows)
+  const invRows = recon.investmentDetails.map(d => `
+    <div style="${subS}${ind}">
+      <div>
+        <div>${d.name}</div>
+        ${d.transferred ? `<div style="font-size:11px;color:var(--text-2)">incl. ${fmtChg(d.transferred)} transfers in/out</div>` : ''}
+      </div>
+      <span style="color:${clr(d.marketReturn)}">${fmtChg(d.marketReturn)}</span>
+    </div>`).join('');
 
   return `
     <div class="settings-card" style="margin:8px 12px">
@@ -3008,7 +2987,7 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
       </div>
 
       <div style="${pad}${BD}">
-        <div style="${hdgS}">New savings (from transactions)</div>
+        <div style="${hdgS}">Expected savings</div>
         ${newSavingsRows}
         ${recon.savingsByPeriod.length > 1 ? `
         <div style="${rowS}padding-top:4px;border-top:1px solid var(--border);font-weight:600;font-size:13px">
@@ -3028,7 +3007,7 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
 
       ${recon.mortgageDetails ? `
       <div style="${pad}${BD}">
-        <div style="${hdgS}">Mortgage capital benefit</div>
+        <div style="${hdgS}">Mortgage interest (cost)</div>
         ${mortgageRow}
       </div>` : ''}
 
@@ -4024,7 +4003,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 17:30 BST (v39)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 19:00 BST (v40)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
