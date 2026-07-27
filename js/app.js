@@ -2487,13 +2487,29 @@ async function renderNetWealth() {
     nwScreen.querySelector('#nw-reconciliation-panel')?.before(banner);
   }
 
-  // Reconciliation panel (requires at least 2 snapshots)
-  // dates is newest-first, so dates[1] is the older (start) and dates[0] is the newer (end)
+  // Reconciliation panel with prev/next navigation across snapshot pairs.
+  // dates is newest-first; reconIdx=0 means the most recent pair (dates[1]→dates[0]).
+  // reconIdx=1 means the next older pair (dates[2]→dates[1]), and so on.
   if (dates.length >= 2) {
-    buildReconciliationHTML(dates[1], dates[0], snapshotMap, allSnapshots, accounts).then(html => {
+    let reconIdx = 0;
+    const maxIdx = dates.length - 2; // deepest valid index
+
+    function renderReconPanel() {
       const panel = nwScreen.querySelector('#nw-reconciliation-panel');
-      if (panel) panel.innerHTML = html;
-    }).catch(e => console.warn('reconciliation panel failed:', e));
+      if (!panel) return;
+      panel.innerHTML = '<div style="padding:20px 14px;text-align:center;color:var(--text-2);font-size:13px">Loading reconciliation…</div>';
+      const endDate   = dates[reconIdx];
+      const startDate = dates[reconIdx + 1];
+      buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, reconIdx > 0, reconIdx < maxIdx)
+        .then(html => {
+          if (!panel.isConnected) return;
+          panel.innerHTML = html;
+          panel.querySelector('#recon-older')?.addEventListener('click', () => { reconIdx++; renderReconPanel(); });
+          panel.querySelector('#recon-newer')?.addEventListener('click', () => { reconIdx--; renderReconPanel(); });
+        })
+        .catch(e => { panel.innerHTML = ''; console.warn('reconciliation panel failed:', e); });
+    }
+    renderReconPanel();
   }
 
   nwScreen.querySelector('#nw-inflation-rate-row')?.addEventListener('click', () => {
@@ -2925,7 +2941,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   };
 }
 
-async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts) {
+async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, hasPrev = false, hasNext = false) {
   const recon = await calcReconciliation(startDate, endDate, snapshotMap, allSnapshots, accounts);
   const fmtChg = v => `${v >= 0 ? '+' : ''}${fmt(v)}`;
   const clr = v => v >= 0 ? '#43a047' : '#e53935';
@@ -2978,7 +2994,11 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
     <div class="settings-card" style="margin:8px 12px">
 
       <div style="${pad}${BD}">
-        <div style="${hdgS}">Reconciliation · ${lbl}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <button id="recon-older" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${hasPrev ? 'var(--text)' : 'var(--border)'};pointer-events:${hasPrev ? 'auto' : 'none'}">‹</button>
+          <div style="${hdgS}margin-bottom:0">Reconciliation · ${lbl}</div>
+          <button id="recon-newer" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${hasNext ? 'var(--text)' : 'var(--border)'};pointer-events:${hasNext ? 'auto' : 'none'}">›</button>
+        </div>
         <div style="${rowS}font-weight:700;font-size:15px">
           <span>Actual net wealth change</span>
           <span style="color:${clr(recon.actualChange)}">${fmtChg(recon.actualChange)}</span>
@@ -4002,7 +4022,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 21:15 BST (v42)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 22:00 BST (v43)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
