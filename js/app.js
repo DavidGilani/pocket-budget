@@ -45,7 +45,13 @@ function animateCounter(el, from, to, duration = 420) {
   requestAnimationFrame(step);
 }
 
+// Remember scroll position per view, so returning to a screen (e.g. Settings)
+// restores where you were rather than jumping back to the top.
+const scrollPositions = {};
+
 function navigate(view, params = {}) {
+  // Save the outgoing view's scroll position before we leave it.
+  if (state.view) scrollPositions[state.view] = viewContainer.scrollTop;
   if (view === 'analysis' && state.view !== 'analysis') state.analysisViewingCycle = null;
   Object.assign(state, params);
   state.view = view;
@@ -66,6 +72,7 @@ async function renderView(view) {
       case 'extraIncomes': await renderExtraIncomes(); break;
       case 'accounts':     await renderAccounts(); break;
       case 'netWealth':    await renderNetWealth(); break;
+      case 'mortgageFree': await renderMortgageFree(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
@@ -77,6 +84,8 @@ async function renderView(view) {
     viewContainer.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-title">Something went wrong</div><div class="empty-text">${err.message}</div></div>`;
     console.error(err);
   }
+  // Restore the scroll position for this view (top for a first visit).
+  viewContainer.scrollTop = scrollPositions[view] ?? 0;
 }
 
 function showToast(msg) {
@@ -3432,95 +3441,90 @@ function drawMortgageChart(canvas, p) {
   });
 }
 
-async function openMortgageFreeSheet() {
-  const overlay = document.createElement('div');
-  overlay.className = 'sheet-overlay';
-  document.body.appendChild(overlay);
-  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+async function renderMortgageFree() {
+  const p = await computeMortgageProjection();
 
-  async function refresh() {
-    const p = await computeMortgageProjection();
-    if (!overlay.isConnected) return;
-    if (!p) {
-      overlay.innerHTML = `
-        <div class="sheet"><div class="sheet-handle"></div>
-          <div class="sheet-header"><span class="sheet-title">🏡 Mortgage free</span><button class="sheet-close" id="mf-close">✕</button></div>
-          <div class="sheet-body" style="padding:24px"><div class="empty-text">No mortgage account found.</div></div>
-        </div>`;
-      overlay.querySelector('#mf-close').onclick = () => overlay.remove();
-      return;
-    }
-    const row = (label, value, id) => `
-      <div class="settings-row"${id ? ` id="${id}" style="cursor:pointer"` : ''}>
-        <span class="settings-row-label">${label}</span>
-        <span style="margin-left:auto;font-weight:600">${value}</span>
-        ${id ? '<span class="settings-row-chevron">›</span>' : ''}
+  if (!p) {
+    viewContainer.innerHTML = `
+      <div class="settings-screen">
+        <div class="screen-header">
+          <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <span class="screen-title">Mortgage free</span>
+          <div style="width:34px"></div>
+        </div>
+        <div class="empty-state"><div class="empty-icon">🏡</div><div class="empty-text">No mortgage account found.</div></div>
       </div>`;
-    const oList = p.overpayments.slice().reverse().map(o => `
-      <div class="settings-row mf-op-row" data-id="${o.id}" style="cursor:pointer">
-        <div style="flex:1;min-width:0">
-          <div style="font-size:14px">${fmt((Number(o.myAmount) || 0) + (Number(o.richAmount) || 0))}</div>
-          <div style="font-size:12px;color:var(--text-2)">${fmtDate(o.date)} · you ${fmt(Number(o.myAmount) || 0)} · Rich ${fmt(Number(o.richAmount) || 0)}${o.note ? ' · ' + o.note : ''}</div>
-        </div>
-        <span class="settings-row-chevron">›</span>
-      </div>`).join('');
-
-    overlay.innerHTML = `
-      <div class="sheet" style="max-height:92vh">
-        <div class="sheet-handle"></div>
-        <div class="sheet-header">
-          <span class="sheet-title">🏡 Mortgage free</span>
-          <button class="sheet-close" id="mf-close">✕</button>
-        </div>
-        <div class="sheet-body" style="padding:0 0 24px;overflow-y:auto;max-height:calc(92vh - 56px)">
-          <div style="text-align:center;padding:16px 16px 6px">
-            <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Estimated balance remaining</div>
-            <div style="font-size:32px;font-weight:800">${fmt(p.currentPrincipal)}</div>
-            ${p.clearLabel
-              ? `<div style="font-size:13px;color:#43a047;margin-top:2px">Projected mortgage-free ${p.clearLabel} · ${p.monthsToClear} months</div>`
-              : `<div style="font-size:13px;color:#e53935;margin-top:2px">Payments don't currently cover the interest</div>`}
-          </div>
-          <div class="chart-wrap" style="height:210px;margin:4px 12px"><canvas id="mf-chart"></canvas></div>
-          <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Projected savings</div>
-          <div class="settings-card" style="margin:4px 12px">
-            ${row('Interest rate', p.annualRate + '%')}
-            ${row('Standard payment', fmt(p.standardMonthly) + '/mo')}
-            ${row('Your monthly overpayment', fmt(p.myOver) + '/mo', 'mf-my-over')}
-            ${row("Rich's monthly overpayment", fmt(p.richOver) + '/mo', 'mf-rich-over')}
-            ${row('Projected interest saved', fmt(p.interestSaved))}
-          </div>
-          <div style="padding:12px 12px 8px">
-            <button class="btn btn-primary btn-full" id="mf-log">＋ Log overpayment</button>
-          </div>
-          <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Logged overpayments</div>
-          ${p.overpayments.length > 0 ? `
-          <div class="settings-card" style="margin:4px 12px 0">
-            <div class="settings-row">
-              <div style="flex:1">
-                <div style="font-size:13px;font-weight:600">Total overpaid to date</div>
-                <div style="font-size:12px;color:var(--text-2)">Your ${fmt(p.totalMine)} + Rich's ${fmt(p.totalRich)}${p.actualInterestSaved > 1 ? ` · est. ${fmt(p.actualInterestSaved)} interest saved` : ''}</div>
-              </div>
-              <span style="font-weight:700;font-size:15px">${fmt(p.totalOverpaid)}</span>
-            </div>
-          </div>` : ''}
-          ${p.overpayments.length === 0
-            ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first overpayment above.</div>`
-            : `<div class="settings-card" style="margin:4px 12px">${oList}</div>`}
-        </div>
-      </div>`;
-
-    overlay.querySelector('#mf-close').onclick = () => overlay.remove();
-    overlay.querySelector('#mf-log').onclick = () => openMortgageOverpaymentEditor(null, refresh, p);
-    overlay.querySelector('#mf-my-over').onclick = () => openAmountPad('Your monthly overpayment', p.myOver, v => setSetting('mortgageMyOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageMyOverpayment').catch(() => {}); refresh(); }), { noNegative: true });
-    overlay.querySelector('#mf-rich-over').onclick = () => openAmountPad("Rich's monthly overpayment", p.richOver, v => setSetting('mortgageRichOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageRichOverpayment').catch(() => {}); refresh(); }), { noNegative: true });
-    overlay.querySelectorAll('.mf-op-row').forEach(r => r.onclick = () => {
-      const o = p.overpayments.find(x => x.id === Number(r.dataset.id));
-      if (o) openMortgageOverpaymentEditor(o, refresh, p);
-    });
-
-    drawMortgageChart(overlay.querySelector('#mf-chart'), p);
+    return;
   }
-  await refresh();
+
+  const row = (label, value, id) => `
+    <div class="settings-row"${id ? ` id="${id}" style="cursor:pointer"` : ''}>
+      <span class="settings-row-label">${label}</span>
+      <span style="margin-left:auto;font-weight:600">${value}</span>
+      ${id ? '<span class="settings-row-chevron">›</span>' : ''}
+    </div>`;
+  const oList = p.overpayments.slice().reverse().map(o => `
+    <div class="settings-row mf-op-row" data-id="${o.id}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${fmt((Number(o.myAmount) || 0) + (Number(o.richAmount) || 0))}</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(o.date)} · you ${fmt(Number(o.myAmount) || 0)} · Rich ${fmt(Number(o.richAmount) || 0)}${o.note ? ' · ' + o.note : ''}</div>
+      </div>
+      <span class="settings-row-chevron">›</span>
+    </div>`).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <span class="screen-title">Mortgage free</span>
+        <div style="width:34px"></div>
+      </div>
+      <div style="text-align:center;padding:16px 16px 6px">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Estimated balance remaining</div>
+        <div style="font-size:32px;font-weight:800">${fmt(p.currentPrincipal)}</div>
+        ${p.clearLabel
+          ? `<div style="font-size:13px;color:#43a047;margin-top:2px">Projected mortgage-free ${p.clearLabel} · ${p.monthsToClear} months</div>`
+          : `<div style="font-size:13px;color:#e53935;margin-top:2px">Payments don't currently cover the interest</div>`}
+      </div>
+      <div class="chart-wrap" style="height:210px;margin:4px 12px"><canvas id="mf-chart"></canvas></div>
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Projected savings</div>
+      <div class="settings-card" style="margin:4px 12px">
+        ${row('Interest rate', p.annualRate + '%')}
+        ${row('Standard payment', fmt(p.standardMonthly) + '/mo')}
+        ${row('Your monthly overpayment', fmt(p.myOver) + '/mo', 'mf-my-over')}
+        ${row("Rich's monthly overpayment", fmt(p.richOver) + '/mo', 'mf-rich-over')}
+        ${row('Projected interest saved', fmt(p.interestSaved))}
+      </div>
+      <div style="padding:12px 12px 8px">
+        <button class="btn btn-primary btn-full" id="mf-log">＋ Log overpayment</button>
+      </div>
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Logged overpayments</div>
+      ${p.overpayments.length > 0 ? `
+      <div class="settings-card" style="margin:4px 12px 0">
+        <div class="settings-row">
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600">Total overpaid to date</div>
+            <div style="font-size:12px;color:var(--text-2)">Your ${fmt(p.totalMine)} + Rich's ${fmt(p.totalRich)}${p.actualInterestSaved > 1 ? ` · est. ${fmt(p.actualInterestSaved)} interest saved` : ''}</div>
+          </div>
+          <span style="font-weight:700;font-size:15px">${fmt(p.totalOverpaid)}</span>
+        </div>
+      </div>` : ''}
+      ${p.overpayments.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first overpayment above.</div>`
+        : `<div class="settings-card" style="margin:4px 12px">${oList}</div>`}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const reRender = () => renderMortgageFree();
+  viewContainer.querySelector('#mf-log').onclick = () => openMortgageOverpaymentEditor(null, reRender, p);
+  viewContainer.querySelector('#mf-my-over').onclick = () => openAmountPad('Your monthly overpayment', p.myOver, v => setSetting('mortgageMyOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageMyOverpayment').catch(() => {}); reRender(); }), { noNegative: true });
+  viewContainer.querySelector('#mf-rich-over').onclick = () => openAmountPad("Rich's monthly overpayment", p.richOver, v => setSetting('mortgageRichOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageRichOverpayment').catch(() => {}); reRender(); }), { noNegative: true });
+  viewContainer.querySelectorAll('.mf-op-row').forEach(r => r.onclick = () => {
+    const o = p.overpayments.find(x => x.id === Number(r.dataset.id));
+    if (o) openMortgageOverpaymentEditor(o, reRender, p);
+  });
+
+  drawMortgageChart(viewContainer.querySelector('#mf-chart'), p);
 }
 
 async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
@@ -4405,7 +4409,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 23:45 BST (v46)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 00:15 BST (v47)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -4415,7 +4419,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
-  viewContainer.querySelector('#nav-mortgage-free').onclick = () => openMortgageFreeSheet();
+  viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
