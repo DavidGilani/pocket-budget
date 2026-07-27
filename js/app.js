@@ -2410,6 +2410,19 @@ async function renderNetWealth() {
           ${tableHTML}
         </div>
         <div id="nw-reconciliation-panel"></div>
+
+        <div class="settings-section" style="margin-top:12px">
+          <div class="settings-section-title">Financial goals</div>
+          <div class="settings-card">
+            <div class="settings-row" style="cursor:pointer" id="nw-mortgage-free-btn">
+              <span class="settings-row-icon">🏡</span>
+              <span class="settings-row-label">Mortgage free</span>
+              <span id="nw-mortgage-free-sub" style="margin-left:auto;color:var(--text-2);font-size:13px"></span>
+              <span class="settings-row-chevron">›</span>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-card" style="margin:4px 12px 8px">
           <div class="settings-row" style="cursor:pointer" id="nw-edit-past-btn">
             <span class="settings-row-icon">✏️</span>
@@ -2471,6 +2484,11 @@ async function renderNetWealth() {
   nwScreen.querySelector('#nw-edit-past-btn')?.addEventListener('click', () => openPastSnapshotPicker(dates));
   nwScreen.querySelector('#nw-transfers-btn')?.addEventListener('click', () => openTransferListSheet());
   nwScreen.querySelector('#nw-rates-btn')?.addEventListener('click', () => openAccountRatesEditor());
+  nwScreen.querySelector('#nw-mortgage-free-btn')?.addEventListener('click', () => openMortgageFreeSheet());
+  computeMortgageProjection().then(proj => {
+    const sub = nwScreen.querySelector('#nw-mortgage-free-sub');
+    if (sub && proj) sub.textContent = proj.clearDate ? `clear ${proj.clearLabel}` : '';
+  }).catch(() => {});
 
   // Rate expiry warning
   const today = new Date();
@@ -2839,10 +2857,18 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     return snaps[0]?.balance ?? 0;
   }
 
-  const [allRates, transfers] = await Promise.all([
+  const [allRates, transfers, overpayRows] = await Promise.all([
     db.accountRates.toArray(),
     db.accountTransfers.where('date').between(startDate, endDate, true, true).toArray(),
+    db.mortgageOverpayments.where('date').between(startDate, endDate, true, true).toArray(),
   ]);
+
+  // Mortgage overpayments in this period. David's own portion is a transfer
+  // (current account → mortgage), so it's wealth-neutral and needs nothing on the
+  // expected side. Rich's portion pays down a debt the app counts fully as David's,
+  // so it's a genuine wealth gain and IS added to the expected total.
+  const overpayMine = overpayRows.reduce((s, o) => s + (Number(o.myAmount) || 0), 0);
+  const overpayRich = overpayRows.reduce((s, o) => s + (Number(o.richAmount) || 0), 0);
 
   // Expected savings = for each complete budget cycle within [startDate, endDate],
   // the planned savings target PLUS whatever daily budget was left over. Both figures
@@ -2926,7 +2952,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   }).filter(d => d.change !== 0 || d.transferred !== 0);
 
   const investmentMarketReturn = investmentDetails.reduce((s, d) => s + d.marketReturn, 0);
-  const expectedTotal = totalNewSavings + savingsInterest + mortgageInterestCost + investmentMarketReturn;
+  const expectedTotal = totalNewSavings + savingsInterest + mortgageInterestCost + investmentMarketReturn + overpayRich;
   const discrepancy = actualChange - expectedTotal;
 
   return {
@@ -2936,6 +2962,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     savingsInterest, savingsDetails,
     mortgageInterestCost, mortgageDetails,
     investmentMarketReturn, investmentDetails,
+    mortgageOverpay: { mine: overpayMine, rich: overpayRich, total: overpayMine + overpayRich, count: overpayRows.length },
     expectedTotal, discrepancy,
     transfers: enrichedTransfers,
   };
@@ -3028,6 +3055,13 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
       <div style="${pad}${BD}">
         <div style="${hdgS}">Mortgage interest (cost)</div>
         ${mortgageRow}
+      </div>` : ''}
+
+      ${recon.mortgageOverpay && recon.mortgageOverpay.count > 0 ? `
+      <div style="${pad}${BD}">
+        <div style="${hdgS}">Mortgage overpayments</div>
+        <div style="${subS}${ind}"><span>Your contribution (transfer, neutral)</span><span style="color:var(--text-2)">${fmt(recon.mortgageOverpay.mine)}</span></div>
+        <div style="${subS}${ind}"><span>Rich's contribution (counted)</span><span style="color:#43a047">+${fmt(recon.mortgageOverpay.rich)}</span></div>
       </div>` : ''}
 
       ${recon.investmentDetails.length > 0 ? `
@@ -3235,6 +3269,333 @@ async function openTransferListSheet() {
       const t = transfers.find(x => x.id === Number(row.dataset.id));
       if (t) { overlay.remove(); openTransferEditor(t); }
     });
+  });
+}
+
+// ── Financial goals: mortgage-free tracker ────────────────────────────────────
+
+// Pure monthly amortisation from `principal` at `annualRate`% with a fixed total
+// monthly payment (standard + overpayment). Returns the interest paid over the
+// life, the number of months to clear, and the balance after each month.
+function amortiseMortgage(principal, annualRate, standardMonthly, monthlyOver) {
+  const mRate = annualRate / 12 / 100;
+  const totalMonthly = standardMonthly + monthlyOver;
+  let bal = principal;
+  let totalInterest = 0;
+  let months = 0;
+  const series = [principal];
+  const maxMonths = 1200;
+  while (bal > 0.005 && months < maxMonths) {
+    const interest = bal * mRate;
+    let principalPaid = totalMonthly - interest;
+    if (principalPaid <= 0) { months = Infinity; break; } // payment never covers interest
+    totalInterest += interest;
+    principalPaid = Math.min(principalPaid, bal);
+    bal = Math.max(0, bal - principalPaid);
+    months++;
+    series.push(bal);
+  }
+  return { totalInterest, months, series };
+}
+
+async function computeMortgageProjection() {
+  const [accounts, snaps, rates, overpayments, myOverRaw, richOverRaw] = await Promise.all([
+    db.accounts.toArray(),
+    db.accountSnapshots.toArray(),
+    db.accountRates.toArray(),
+    db.mortgageOverpayments.toArray(),
+    getSetting('mortgageMyOverpayment'),
+    getSetting('mortgageRichOverpayment'),
+  ]);
+  const mortgage = accounts.find(a => a.type === 'mortgage' && a.isActive !== false)
+                ?? accounts.find(a => a.type === 'mortgage');
+  if (!mortgage) return null;
+
+  const t = today();
+  const mRates = rates.filter(r => r.accountId === mortgage.id);
+  const rate = mRates
+    .filter(r => r.startDate <= t && (!r.endDate || r.endDate >= t))
+    .sort((a, b) => b.startDate.localeCompare(a.startDate))[0]
+    ?? mRates.sort((a, b) => b.startDate.localeCompare(a.startDate))[0];
+  const annualRate = rate?.rate ?? 3.91;
+  const standardMonthly = rate?.monthlyPayment ?? 1073.17;
+
+  // Anchor to the most recent mortgage snapshot (stored negative → principal is abs).
+  const mSnaps = snaps.filter(s => s.accountId === mortgage.id).sort((a, b) => a.date.localeCompare(b.date));
+  const anchor = mSnaps[mSnaps.length - 1];
+  const anchorPrincipal = anchor ? Math.abs(anchor.balance ?? 0) : 182556.18;
+  const anchorDate = anchor ? anchor.date : t;
+
+  // Overpayments logged AFTER the anchor snapshot further reduce today's balance;
+  // ones before the anchor are already reflected in that snapshot reading.
+  const sortedOver = [...overpayments].sort((a, b) => a.date.localeCompare(b.date));
+  const overAfterAnchor = sortedOver
+    .filter(o => o.date > anchorDate)
+    .reduce((s, o) => s + (Number(o.myAmount) || 0) + (Number(o.richAmount) || 0), 0);
+  const currentPrincipal = Math.max(0, anchorPrincipal - overAfterAnchor);
+
+  const myOver = Number(myOverRaw ?? 1000) || 0;
+  const richOver = Number(richOverRaw ?? 1000) || 0;
+  const assumedOver = myOver + richOver;
+
+  const withOver = amortiseMortgage(currentPrincipal, annualRate, standardMonthly, assumedOver);
+  const withoutOver = amortiseMortgage(currentPrincipal, annualRate, standardMonthly, 0);
+  const interestSaved = withoutOver.totalInterest - withOver.totalInterest;
+
+  const now = new Date();
+  const curKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  let clearDate = null, clearLabel = null;
+  const monthsToClear = withOver.months;
+  if (isFinite(monthsToClear)) {
+    const c = new Date(now.getFullYear(), now.getMonth() + monthsToClear, 1);
+    clearDate = isoDate(c);
+    clearLabel = c.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+  }
+
+  const totalMine = sortedOver.reduce((s, o) => s + (Number(o.myAmount) || 0), 0);
+  const totalRich = sortedOver.reduce((s, o) => s + (Number(o.richAmount) || 0), 0);
+
+  return {
+    mortgage, annualRate, standardMonthly, myOver, richOver, assumedOver,
+    anchorPrincipal, anchorDate, currentPrincipal,
+    withOver, withoutOver, interestSaved,
+    clearDate, clearLabel, monthsToClear,
+    overpayments: sortedOver, totalMine, totalRich, mSnaps, now, curKey,
+  };
+}
+
+function drawMortgageChart(canvas, p) {
+  if (!canvas || typeof Chart === 'undefined') return;
+  const now = p.now;
+  const curKey = p.curKey;
+
+  const maxLen = Math.max(p.withOver.series.length, p.withoutOver.series.length);
+  const cappedLen = Math.min(maxLen, 240);
+  const futureKeys = [];
+  let y = now.getFullYear(), m = now.getMonth() + 1;
+  for (let i = 0; i < cappedLen; i++) { futureKeys.push(`${y}-${String(m).padStart(2, '0')}`); m++; if (m > 12) { m = 1; y++; } }
+
+  const histPairs = p.mSnaps
+    .map(s => ({ key: s.date.slice(0, 7), bal: Math.abs(s.balance ?? 0) }))
+    .filter(x => x.key < curKey);
+
+  const seen = new Set();
+  const labels = [];
+  for (const k of [...histPairs.map(x => x.key), ...futureKeys]) {
+    if (!seen.has(k)) { seen.add(k); labels.push(k); }
+  }
+  const idx = Object.fromEntries(labels.map((k, i) => [k, i]));
+
+  const withData = labels.map(() => null);
+  const withoutData = labels.map(() => null);
+  const actualData = labels.map(() => null);
+  p.withOver.series.slice(0, cappedLen).forEach((v, i) => { const k = futureKeys[i]; if (idx[k] != null) withData[idx[k]] = v; });
+  p.withoutOver.series.slice(0, cappedLen).forEach((v, i) => { const k = futureKeys[i]; if (idx[k] != null) withoutData[idx[k]] = v; });
+  histPairs.forEach(x => { if (idx[x.key] != null) actualData[idx[x.key]] = x.bal; });
+  if (idx[curKey] != null) actualData[idx[curKey]] = p.currentPrincipal;
+
+  const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const dispLabels = labels.map(k => {
+    const [yy, mm] = k.split('-');
+    return mm === '01' ? `${MON[+mm]} ${yy.slice(2)}` : '';
+  });
+
+  if (canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: dispLabels,
+      datasets: [
+        { label: 'With overpayment', data: withData, borderColor: '#43a047', backgroundColor: 'rgba(67,160,71,0.08)', borderWidth: 2, fill: true, tension: 0.2, pointRadius: 0, spanGaps: true },
+        { label: 'Standard only', data: withoutData, borderColor: '#e53935', borderDash: [5, 4], borderWidth: 1.5, fill: false, tension: 0.2, pointRadius: 0, spanGaps: true },
+        { label: 'Actual', data: actualData, borderColor: '#ff9800', backgroundColor: '#ff9800', borderWidth: 0, showLine: false, pointRadius: 3 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: true, position: 'top', labels: { font: { size: 10 }, boxWidth: 10, padding: 8 } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 90, font: { size: 9 }, autoSkip: false } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(0)}k` : `£${v.toFixed(0)}` } },
+      },
+    },
+  });
+}
+
+async function openMortgageFreeSheet() {
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  async function refresh() {
+    const p = await computeMortgageProjection();
+    if (!overlay.isConnected) return;
+    if (!p) {
+      overlay.innerHTML = `
+        <div class="sheet"><div class="sheet-handle"></div>
+          <div class="sheet-header"><span class="sheet-title">🏡 Mortgage free</span><button class="sheet-close" id="mf-close">✕</button></div>
+          <div class="sheet-body" style="padding:24px"><div class="empty-text">No mortgage account found.</div></div>
+        </div>`;
+      overlay.querySelector('#mf-close').onclick = () => overlay.remove();
+      return;
+    }
+    const row = (label, value, id) => `
+      <div class="settings-row"${id ? ` id="${id}" style="cursor:pointer"` : ''}>
+        <span class="settings-row-label">${label}</span>
+        <span style="margin-left:auto;font-weight:600">${value}</span>
+        ${id ? '<span class="settings-row-chevron">›</span>' : ''}
+      </div>`;
+    const oList = p.overpayments.slice().reverse().map(o => `
+      <div class="settings-row mf-op-row" data-id="${o.id}" style="cursor:pointer">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px">${fmt((Number(o.myAmount) || 0) + (Number(o.richAmount) || 0))}</div>
+          <div style="font-size:12px;color:var(--text-2)">${fmtDate(o.date)} · you ${fmt(Number(o.myAmount) || 0)} · Rich ${fmt(Number(o.richAmount) || 0)}${o.note ? ' · ' + o.note : ''}</div>
+        </div>
+        <span class="settings-row-chevron">›</span>
+      </div>`).join('');
+
+    overlay.innerHTML = `
+      <div class="sheet" style="max-height:92vh">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">🏡 Mortgage free</span>
+          <button class="sheet-close" id="mf-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:0 0 24px;overflow-y:auto;max-height:calc(92vh - 56px)">
+          <div style="text-align:center;padding:16px 16px 6px">
+            <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Estimated balance remaining</div>
+            <div style="font-size:32px;font-weight:800">${fmt(p.currentPrincipal)}</div>
+            ${p.clearLabel
+              ? `<div style="font-size:13px;color:#43a047;margin-top:2px">Projected mortgage-free ${p.clearLabel} · ${p.monthsToClear} months</div>`
+              : `<div style="font-size:13px;color:#e53935;margin-top:2px">Payments don't currently cover the interest</div>`}
+          </div>
+          <div class="chart-wrap" style="height:210px;margin:4px 12px"><canvas id="mf-chart"></canvas></div>
+          <div class="settings-card" style="margin:8px 12px">
+            ${row('Interest rate', p.annualRate + '%')}
+            ${row('Standard payment', fmt(p.standardMonthly) + '/mo')}
+            ${row('Your monthly overpayment', fmt(p.myOver) + '/mo', 'mf-my-over')}
+            ${row("Rich's monthly overpayment", fmt(p.richOver) + '/mo', 'mf-rich-over')}
+            ${row('Interest saved by overpaying', fmt(p.interestSaved))}
+          </div>
+          <div style="padding:0 12px">
+            <button class="btn btn-primary btn-full" id="mf-log">＋ Log overpayment</button>
+          </div>
+          <div style="padding:14px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Logged overpayments</div>
+          ${p.overpayments.length === 0
+            ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first overpayment above.</div>`
+            : `<div class="settings-card" style="margin:4px 12px">${oList}</div>`}
+        </div>
+      </div>`;
+
+    overlay.querySelector('#mf-close').onclick = () => overlay.remove();
+    overlay.querySelector('#mf-log').onclick = () => openMortgageOverpaymentEditor(null, refresh, p);
+    overlay.querySelector('#mf-my-over').onclick = () => openAmountPad('Your monthly overpayment', p.myOver, v => setSetting('mortgageMyOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageMyOverpayment').catch(() => {}); refresh(); }), { noNegative: true });
+    overlay.querySelector('#mf-rich-over').onclick = () => openAmountPad("Rich's monthly overpayment", p.richOver, v => setSetting('mortgageRichOverpayment', Math.max(0, v)).then(() => { queueWrite('settings', 'mortgageRichOverpayment').catch(() => {}); refresh(); }), { noNegative: true });
+    overlay.querySelectorAll('.mf-op-row').forEach(r => r.onclick = () => {
+      const o = p.overpayments.find(x => x.id === Number(r.dataset.id));
+      if (o) openMortgageOverpaymentEditor(o, refresh, p);
+    });
+
+    drawMortgageChart(overlay.querySelector('#mf-chart'), p);
+  }
+  await refresh();
+}
+
+async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
+  const accounts = await db.accounts.toArray();
+  const mortgage = accounts.find(a => a.type === 'mortgage');
+  const fromAcc = accounts.filter(a => a.type === 'bank' && a.isActive !== false).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))[0]
+               ?? accounts.find(a => a.id === 1);
+
+  let oDate = existing?.date ?? today();
+  let myAmount = existing?.myAmount ?? (proj?.myOver ?? 1000);
+  let richAmount = existing?.richAmount ?? (proj?.richOver ?? 1000);
+  let note = existing?.note ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Log'} overpayment</span>
+        <button class="sheet-close" id="mo-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input class="form-input" type="date" id="mo-date" value="${oDate}" max="${today()}">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="mo-my-row">
+          <label class="form-label">Your contribution</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="mo-my-disp" style="font-size:16px;font-weight:600">${fmt(myAmount)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="mo-rich-row">
+          <label class="form-label">Rich's contribution</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="mo-rich-disp" style="font-size:16px;font-weight:600">${fmt(richAmount)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:var(--text-2)">
+          Total off mortgage: <b id="mo-total" style="color:var(--text)">${fmt(myAmount + richAmount)}</b><br>
+          Your ${fmt(myAmount)} is recorded as a transfer from ${fromAcc?.name ?? 'your current account'} → ${mortgage?.name ?? 'Mortgage'}.
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="mo-note" value="${note}" placeholder="e.g. March overpayment" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="mo-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="mo-save">Save</button>
+      </div>
+    </div>`;
+
+  const updTotal = () => { overlay.querySelector('#mo-total').textContent = fmt((myAmount || 0) + (richAmount || 0)); };
+  overlay.querySelector('#mo-close').onclick = () => overlay.remove();
+  overlay.querySelector('#mo-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#mo-note').oninput = e => { note = e.target.value; };
+  overlay.querySelector('#mo-my-row').onclick = () => openAmountPad('Your contribution', myAmount, v => { myAmount = Math.max(0, v); overlay.querySelector('#mo-my-disp').textContent = fmt(myAmount); updTotal(); }, { noNegative: true });
+  overlay.querySelector('#mo-rich-row').onclick = () => openAmountPad("Rich's contribution", richAmount, v => { richAmount = Math.max(0, v); overlay.querySelector('#mo-rich-disp').textContent = fmt(richAmount); updTotal(); }, { noNegative: true });
+
+  overlay.querySelector('#mo-save').onclick = async () => {
+    if ((myAmount || 0) + (richAmount || 0) <= 0) { showToast('Enter an amount'); return; }
+    const rec = { date: oDate, myAmount: myAmount || 0, richAmount: richAmount || 0, note: note.trim() };
+
+    // Keep the linked "my portion" transfer (current account → mortgage) in sync.
+    let transferId = existing?.transferId;
+    if ((myAmount || 0) > 0 && fromAcc && mortgage) {
+      const tf = { fromAccountId: fromAcc.id, toAccountId: mortgage.id, date: oDate, amount: myAmount, note: 'Mortgage overpayment', isRecurring: false };
+      if (transferId) { await db.accountTransfers.update(transferId, tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+      else { transferId = await db.accountTransfers.add(tf); queueWrite('accountTransfers', transferId).catch(() => {}); }
+    } else if (transferId) {
+      await db.accountTransfers.delete(transferId); queueDelete('accountTransfers', transferId).catch(() => {}); transferId = null;
+    }
+    rec.transferId = transferId ?? null;
+
+    if (existing) {
+      await db.mortgageOverpayments.update(existing.id, rec);
+      queueWrite('mortgageOverpayments', existing.id).catch(() => {});
+    } else {
+      const id = await db.mortgageOverpayments.add(rec);
+      queueWrite('mortgageOverpayments', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'Overpayment updated' : 'Overpayment logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#mo-del')?.addEventListener('click', async () => {
+    if (existing.transferId) { await db.accountTransfers.delete(existing.transferId); queueDelete('accountTransfers', existing.transferId).catch(() => {}); }
+    await db.mortgageOverpayments.delete(existing.id);
+    queueDelete('mortgageOverpayments', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Overpayment deleted');
+    onSaved?.();
   });
 }
 
@@ -4022,7 +4383,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 22:30 BST (v44)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 23:15 BST (v45)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();

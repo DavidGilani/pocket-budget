@@ -30,6 +30,12 @@ db.version(2).stores({
   ]);
 });
 
+// Financial goals: mortgage overpayment log. Each row records David's own
+// contribution and Rich's contribution for a single overpayment event.
+db.version(3).stores({
+  mortgageOverpayments: '++id, date',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
