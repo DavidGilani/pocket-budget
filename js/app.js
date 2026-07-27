@@ -2823,40 +2823,31 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
     return snaps[0]?.balance ?? 0;
   }
 
-  const [allRates, transfers, cycleStartDayRaw, savingsAmountRaw] = await Promise.all([
+  const [allRates, transfers] = await Promise.all([
     db.accountRates.toArray(),
     db.accountTransfers.where('date').between(startDate, endDate, true, true).toArray(),
-    getSetting('cycleStartDay'),
-    getSetting('savingsAmount'),
   ]);
 
-  const cycleStartDay = cycleStartDayRaw ?? 1;
-  const savingsAmount = savingsAmountRaw ?? 0;
-
-  // Complete budget cycles fully within [startDate, endDate]
-  function getCompleteCycles() {
-    const cycles = [];
-    const sDate = new Date(startDate + 'T12:00:00');
-    const eDate = new Date(endDate + 'T12:00:00');
-    // First cycle start on or after startDate
-    let y = sDate.getFullYear(), m = sDate.getMonth();
-    let cycleBegin = new Date(y, m, cycleStartDay);
-    if (cycleBegin < sDate) cycleBegin = new Date(y, m + 1, cycleStartDay);
-    while (cycleBegin < eDate) {
-      const nextBegin = new Date(cycleBegin.getFullYear(), cycleBegin.getMonth() + 1, cycleStartDay);
-      const cycleEnd = new Date(nextBegin.getTime() - 86400000);
-      if (cycleEnd < eDate) {
-        cycles.push({ label: cycleBegin.toLocaleDateString('en-GB', { month: 'long' }) });
-      }
-      cycleBegin = nextBegin;
+  // Expected savings = for each complete budget cycle within [startDate, endDate],
+  // the planned savings target PLUS whatever daily budget was left over. Both figures
+  // come straight from getCycleBreakdown – the same single source of truth the Daily
+  // Budget screen uses – so nothing here is hand-entered.
+  const savingsByPeriod = [];
+  let cursor = startDate;
+  while (cursor <= endDate) {
+    const cyc = await getCycleForDate(cursor);
+    if (cyc.start >= startDate && cyc.end <= endDate) {
+      const bd = await getCycleBreakdown(cyc.start, cyc.end);
+      savingsByPeriod.push({
+        label: new Date(cyc.start + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long' }),
+        savingsTarget: bd.savings,
+        budgetLeft: bd.budgetLeft,
+        net: bd.savings + bd.budgetLeft,
+      });
     }
-    return cycles;
+    cursor = addDays(cyc.end, 1);
   }
-
-  // Expected savings = planned savings amount per complete cycle
-  const completeCycles = getCompleteCycles();
-  const savingsByPeriod = completeCycles.map(c => ({ label: c.label, net: savingsAmount }));
-  const totalNewSavings = savingsAmount * completeCycles.length;
+  const totalNewSavings = savingsByPeriod.reduce((s, p) => s + p.net, 0);
 
   function rateAt(accountId, date) {
     return allRates
@@ -2899,7 +2890,10 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   }
 
   const investmentAccs = accounts.filter(a => reconcileTypeForAccount(a) === 'investment');
-  const actualChange = groupChange(accounts.filter(a => reconcileTypeForAccount(a) !== 'excluded'));
+  // Actual change must match the Net Wealth table exactly: every active account,
+  // including holdings (Bank of Gilulu) and loans that reconcileType treats as "excluded".
+  const activeAccounts = accounts.filter(a => a.isActive !== false && a.type !== 'holding_archived');
+  const actualChange = groupChange(activeAccounts);
 
   // Investment market returns = actual investment change minus any transfers in/out
   const enrichedTransfers = transfers.map(t => ({ ...t, fromAcc: accountMap[t.fromAccountId], toAcc: accountMap[t.toAccountId] }));
@@ -2948,10 +2942,13 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
     : recon.discrepancy > 0 ? 'More wealth gained than expected – possible unlogged income or timing difference'
     : 'Less wealth gained than expected – possible unlogged spending or timing difference';
 
-  // New savings rows (per budget cycle)
-  const newSavingsRows = recon.savingsByPeriod.map(p =>
-    `<div style="${subS}${ind}"><span>${p.label}</span><span style="color:${clr(p.net)}">${fmtChg(p.net)}</span></div>`
-  ).join('');
+  // Expected savings rows (per budget cycle): savings target + budget left
+  const ind2 = 'padding-left:28px;';
+  const newSavingsRows = recon.savingsByPeriod.map(p => `
+    <div style="${subS}${ind}font-weight:600;color:var(--text)"><span>${p.label}</span><span style="color:${clr(p.net)}">${fmtChg(p.net)}</span></div>
+    <div style="${subS}${ind2}"><span>Savings target</span><span style="color:${clr(p.savingsTarget)}">${fmtChg(p.savingsTarget)}</span></div>
+    <div style="${subS}${ind2}"><span>Budget left</span><span style="color:${clr(p.budgetLeft)}">${fmtChg(p.budgetLeft)}</span></div>
+  `).join('');
 
   // Savings interest rows
   const savingsRows = recon.savingsDetails.map(d =>
@@ -4003,7 +4000,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 19:00 BST (v40)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 20:30 BST (v41)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
