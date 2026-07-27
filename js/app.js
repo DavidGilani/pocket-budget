@@ -2251,11 +2251,12 @@ function openAmountPad(title, initialValue, onConfirm, opts = {}) {
 }
 
 async function renderNetWealth() {
-  const [accounts, allSnapshots, inflationRate, inflationOverridesRaw] = await Promise.all([
+  const [accounts, allSnapshots, inflationRate, inflationOverridesRaw, allRates] = await Promise.all([
     db.accounts.orderBy('sortOrder').toArray(),
     db.accountSnapshots.toArray(),
     getSetting('inflationRate'),
     getSetting('inflationOverrides'),
+    db.accountRates.toArray(),
   ]);
 
   const activeAccounts = accounts.filter(a => a.isActive !== false && a.type !== 'holding_archived');
@@ -2408,10 +2409,21 @@ async function renderNetWealth() {
         <div class="settings-card" style="margin:10px 12px;border-radius:var(--radius);overflow:hidden">
           ${tableHTML}
         </div>
+        <div id="nw-reconciliation-panel"></div>
         <div class="settings-card" style="margin:4px 12px 8px">
           <div class="settings-row" style="cursor:pointer" id="nw-edit-past-btn">
             <span class="settings-row-icon">✏️</span>
             <span class="settings-row-label">Edit a past snapshot</span>
+            <span class="settings-row-chevron">›</span>
+          </div>
+          <div class="settings-row" style="cursor:pointer" id="nw-transfers-btn">
+            <span class="settings-row-icon">↔</span>
+            <span class="settings-row-label">View transfers</span>
+            <span class="settings-row-chevron">›</span>
+          </div>
+          <div class="settings-row" style="cursor:pointer" id="nw-rates-btn">
+            <span class="settings-row-icon">📊</span>
+            <span class="settings-row-label">Account rates</span>
             <span class="settings-row-chevron">›</span>
           </div>
         </div>
@@ -2452,11 +2464,36 @@ async function renderNetWealth() {
   `;
 
   const nwScreen = viewContainer.querySelector('.settings-screen');
-  nwScreen.querySelector('#nw-add-btn').addEventListener('click', () => openWealthSnapshotEditor(null));
+  nwScreen.querySelector('#nw-add-btn').addEventListener('click', () => openNwAddMenu());
   const emptyAdd = nwScreen.querySelector('#nw-empty-add');
   if (emptyAdd) emptyAdd.addEventListener('click', () => openWealthSnapshotEditor(null));
 
   nwScreen.querySelector('#nw-edit-past-btn')?.addEventListener('click', () => openPastSnapshotPicker(dates));
+  nwScreen.querySelector('#nw-transfers-btn')?.addEventListener('click', () => openTransferListSheet());
+  nwScreen.querySelector('#nw-rates-btn')?.addEventListener('click', () => openAccountRatesEditor());
+
+  // Rate expiry warning
+  const today = new Date();
+  const soon = new Date(today); soon.setDate(today.getDate() + 60);
+  const soonStr = soon.toISOString().slice(0, 10);
+  const todayStr = today.toISOString().slice(0, 10);
+  const expiringRates = allRates.filter(r => r.endDate && r.endDate >= todayStr && r.endDate <= soonStr);
+  if (expiringRates.length > 0) {
+    const accMap = Object.fromEntries(accounts.map(a => [a.id, a.name]));
+    const banner = document.createElement('div');
+    banner.style.cssText = 'margin:6px 12px;padding:10px 14px;background:#fff3cd;border-radius:8px;font-size:13px;color:#856404;cursor:pointer';
+    banner.innerHTML = `⚠️ Rate expiring soon: ${expiringRates.map(r => `${accMap[r.accountId] ?? 'Account'} (${r.endDate})`).join(', ')}`;
+    banner.addEventListener('click', () => openAccountRatesEditor());
+    nwScreen.querySelector('#nw-reconciliation-panel')?.before(banner);
+  }
+
+  // Reconciliation panel (requires at least 2 snapshots)
+  if (dates.length >= 2) {
+    buildReconciliationHTML(dates[0], dates[1], snapshotMap, allSnapshots, accounts).then(html => {
+      const panel = nwScreen.querySelector('#nw-reconciliation-panel');
+      if (panel) panel.innerHTML = html;
+    }).catch(e => console.warn('reconciliation panel failed:', e));
+  }
 
   nwScreen.querySelector('#nw-inflation-rate-row')?.addEventListener('click', () => {
     openAmountPad('Annual inflation rate', rate, val => {
@@ -2757,6 +2794,477 @@ function openPastSnapshotPicker(dates) {
       overlay.remove();
       openWealthSnapshotEditor(row.dataset.pickDate);
     });
+  });
+}
+
+// ── Net Wealth: reconciliation helpers ────────────────────────────────────────
+
+function reconcileTypeForAccount(acc) {
+  switch (acc.type) {
+    case 'bank': case 'credit': return 'cash';
+    case 'savings': return 'savings';
+    case 'investment': case 'pension': return 'investment';
+    case 'mortgage': return 'mortgage';
+    case 'property': return 'property';
+    default: return 'excluded';
+  }
+}
+
+async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots, accounts) {
+  const days = diffDays(startDate, endDate) + 1;
+
+  function balanceAt(accountId, date) {
+    const exact = snapshotMap[date]?.[accountId];
+    if (exact != null) return exact;
+    const snaps = allSnapshots
+      .filter(s => s.accountId === accountId && s.date <= date)
+      .sort((a, b) => b.date.localeCompare(a.date));
+    return snaps[0]?.balance ?? 0;
+  }
+
+  const [txns, allRates, transfers] = await Promise.all([
+    db.transactions.where('date').between(startDate, endDate, true, true)
+      .filter(t => ['expense','income','distributed_expense','distributed_income'].includes(t.type))
+      .toArray(),
+    db.accountRates.toArray(),
+    db.accountTransfers.where('date').between(startDate, endDate, true, true).toArray(),
+  ]);
+
+  const netTransactions = txns.reduce((s, t) => s + t.amount, 0);
+
+  function rateAt(accountId, date) {
+    return allRates
+      .filter(r => r.accountId === accountId && r.startDate <= date && (!r.endDate || r.endDate >= date))
+      .sort((a, b) => b.startDate.localeCompare(a.startDate))[0] ?? null;
+  }
+
+  // Savings interest
+  let savingsInterest = 0;
+  const savingsDetails = [];
+  for (const acc of accounts) {
+    if (reconcileTypeForAccount(acc) !== 'savings') continue;
+    const bal = balanceAt(acc.id, startDate);
+    if (!bal) continue;
+    const rate = rateAt(acc.id, startDate);
+    if (!rate) continue;
+    const interest = bal * (rate.rate / 100) * (days / 365);
+    savingsInterest += interest;
+    savingsDetails.push({ name: acc.name, balance: bal, rate: rate.rate, interest });
+  }
+
+  // Mortgage capital benefit
+  let mortgageCapital = 0;
+  let mortgageDetails = null;
+  for (const acc of accounts) {
+    if (reconcileTypeForAccount(acc) !== 'mortgage') continue;
+    const bal = Math.abs(balanceAt(acc.id, startDate));
+    if (!bal) continue;
+    const rate = rateAt(acc.id, startDate);
+    if (!rate?.monthlyPayment) continue;
+    const months = days / 30.4375;
+    const interest = bal * (rate.rate / 100) * (days / 365);
+    const payments = rate.monthlyPayment * months;
+    const capital = Math.max(0, payments - interest);
+    mortgageCapital += capital;
+    mortgageDetails = { name: acc.name, balance: bal, rate: rate.rate, payments, interest, capital };
+  }
+
+  const accountMap = Object.fromEntries(accounts.map(a => [a.id, a]));
+
+  function groupChange(accs) {
+    return accs.reduce((s, a) => s + balanceAt(a.id, endDate) - balanceAt(a.id, startDate), 0);
+  }
+
+  const trackableAccs = accounts.filter(a => ['cash','savings','mortgage'].includes(reconcileTypeForAccount(a)));
+  const investmentAccs = accounts.filter(a => reconcileTypeForAccount(a) === 'investment');
+
+  const actualChange = groupChange(accounts.filter(a => reconcileTypeForAccount(a) !== 'excluded'));
+  const trackableActual = groupChange(trackableAccs);
+  const investmentActual = groupChange(investmentAccs);
+
+  // Investment market returns = actual change minus transfers in/out
+  const enrichedTransfers = transfers.map(t => ({ ...t, fromAcc: accountMap[t.fromAccountId], toAcc: accountMap[t.toAccountId] }));
+  const investmentDetails = investmentAccs.map(a => {
+    const change = balanceAt(a.id, endDate) - balanceAt(a.id, startDate);
+    const transferred = enrichedTransfers.reduce((s, t) => {
+      if (t.toAccountId === a.id) return s + t.amount;
+      if (t.fromAccountId === a.id) return s - t.amount;
+      return s;
+    }, 0);
+    return { name: a.name, change, transferred, marketReturn: change - transferred };
+  }).filter(d => d.change !== 0 || d.transferred !== 0);
+
+  const investmentMarketReturn = investmentDetails.reduce((s, d) => s + d.marketReturn, 0);
+  const expectedTrackable = netTransactions + savingsInterest + mortgageCapital;
+  const discrepancy = trackableActual - expectedTrackable;
+
+  return {
+    startDate, endDate, days,
+    actualChange, trackableActual, investmentActual,
+    netTransactions, savingsInterest, savingsDetails,
+    mortgageCapital, mortgageDetails,
+    expectedTrackable, discrepancy,
+    investmentMarketReturn, investmentDetails,
+    transfers: enrichedTransfers,
+  };
+}
+
+async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts) {
+  const recon = await calcReconciliation(startDate, endDate, snapshotMap, allSnapshots, accounts);
+  const fmtChg = v => `${v >= 0 ? '+' : ''}${fmt(v)}`;
+  const clr = v => v >= 0 ? '#43a047' : '#e53935';
+  const rowS = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;';
+  const subS = rowS + 'font-size:13px;color:var(--text-2);';
+  const ind = 'padding-left:12px;';
+  const lbl = new Date(startDate + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
+            + ' – ' + new Date(endDate + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+
+  const discAbs = Math.abs(recon.discrepancy);
+  const discClr = discAbs < 50 ? '#43a047' : (recon.discrepancy < 0 ? '#e53935' : '#ff9800');
+  const discNote = discAbs < 50 ? 'Fully accounted for'
+    : recon.discrepancy < 0 ? 'Possible unlogged spending or timing difference'
+    : 'Possible unlogged income or timing difference';
+
+  const savingsRows = recon.savingsDetails.map(d =>
+    `<div style="${subS}${ind}"><span>${d.name} (${d.rate}% AER)</span><span>+${fmt(d.interest)}</span></div>`
+  ).join('');
+
+  const mortgageRow = recon.mortgageDetails ? `
+    <div style="${subS}${ind}">
+      <span>${recon.mortgageDetails.rate}% on £${fmt(recon.mortgageDetails.balance)} · ${recon.days}d</span>
+      <span>interest: –${fmt(recon.mortgageDetails.interest)}</span>
+    </div>` : '';
+
+  const invRows = recon.investmentDetails.map(d => `
+    <div style="${subS}${ind}">
+      <div><div>${d.name}</div>${d.transferred ? `<div style="font-size:11px">transfers in/out: ${fmtChg(d.transferred)}</div>` : ''}</div>
+      <div style="text-align:right">
+        <div style="color:${clr(d.change)}">${fmtChg(d.change)}</div>
+        ${d.transferred ? `<div style="font-size:11px;color:var(--text-2)">market: ${fmtChg(d.marketReturn)}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+  const txfrRows = recon.transfers.map(t => {
+    const from = t.fromAcc?.name ?? '?';
+    const to = t.toAcc?.name ?? '?';
+    return `<div style="${subS}${ind}"><span>${fmtDate(t.date)} · ${from} → ${to}${t.note ? ` (${t.note})` : ''}</span><span>${fmt(t.amount)}</span></div>`;
+  }).join('');
+
+  return `
+    <div class="settings-card" style="margin:8px 12px">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2);margin-bottom:6px">RECONCILIATION · ${lbl}</div>
+        <div style="${rowS}font-weight:700">
+          <span>Actual net wealth change</span>
+          <span style="color:${clr(recon.actualChange)}">${fmtChg(recon.actualChange)}</span>
+        </div>
+      </div>
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
+        <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Expected (trackable accounts)</div>
+        <div style="${subS}"><span>Logged transactions (net)</span><span style="color:${clr(recon.netTransactions)}">${fmtChg(recon.netTransactions)}</span></div>
+        ${recon.savingsInterest > 0.01 ? `<div style="${subS}"><span>Savings interest (est.)</span><span style="color:#43a047">+${fmt(recon.savingsInterest)}</span></div>${savingsRows}` : ''}
+        ${recon.mortgageCapital > 0.01 ? `<div style="${subS}"><span>Mortgage capital benefit</span><span style="color:#43a047">+${fmt(recon.mortgageCapital)}</span></div>${mortgageRow}` : ''}
+        <div style="${rowS}padding-top:6px;border-top:1px solid var(--border);font-weight:600">
+          <span>Total expected</span><span style="color:${clr(recon.expectedTrackable)}">${fmtChg(recon.expectedTrackable)}</span>
+        </div>
+      </div>
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
+        <div style="${rowS}font-weight:700"><span>Discrepancy</span><span style="color:${discClr}">${fmtChg(recon.discrepancy)}</span></div>
+        <div style="font-size:12px;color:${discClr};margin-top:2px">${discNote}</div>
+      </div>
+      ${recon.investmentDetails.length > 0 ? `
+        <div style="padding:12px 14px;${recon.transfers.length > 0 ? 'border-bottom:1px solid var(--border);' : ''}">
+          <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Investment returns (market-linked)</div>
+          ${invRows}
+          <div style="${rowS}padding-top:4px;font-weight:600">
+            <span>Total market return</span><span style="color:${clr(recon.investmentMarketReturn)}">${fmtChg(recon.investmentMarketReturn)}</span>
+          </div>
+        </div>` : ''}
+      ${recon.transfers.length > 0 ? `
+        <div style="padding:12px 14px">
+          <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Transfers in period</div>
+          ${txfrRows}
+        </div>` : ''}
+    </div>`;
+}
+
+function openNwAddMenu() {
+  const menu = document.createElement('div');
+  menu.className = 'sheet-overlay';
+  menu.innerHTML = `
+    <div class="sheet" style="max-height:260px">
+      <div class="sheet-handle"></div>
+      <div class="sheet-body" style="padding:20px 16px;display:flex;flex-direction:column;gap:10px">
+        <button class="btn btn-primary btn-full" id="nw-menu-snap" style="font-size:16px;padding:16px">📸 Record snapshot</button>
+        <button class="btn btn-full" id="nw-menu-transfer" style="font-size:16px;padding:16px">↔ Log transfer</button>
+      </div>
+    </div>`;
+  document.body.appendChild(menu);
+  menu.onclick = e => { if (e.target === menu) menu.remove(); };
+  menu.querySelector('#nw-menu-snap').onclick = () => { menu.remove(); openWealthSnapshotEditor(null); };
+  menu.querySelector('#nw-menu-transfer').onclick = () => { menu.remove(); openTransferEditor(null); };
+}
+
+async function openTransferEditor(existing) {
+  const accounts = (await db.accounts.orderBy('sortOrder').toArray())
+    .filter(a => a.isActive !== false && a.type !== 'holding' && a.type !== 'holding_archived');
+
+  let fromId = existing?.fromAccountId ?? accounts[0]?.id;
+  let toId   = existing?.toAccountId   ?? accounts[1]?.id;
+  let tDate  = existing?.date   ?? today();
+  let amount = existing?.amount ?? 0;
+  let note   = existing?.note   ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  function build() {
+    const opts = accounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+    overlay.innerHTML = `
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">${existing ? 'Edit' : 'Log'} Transfer</span>
+          <button class="sheet-close" id="tf-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:16px">
+          <div class="form-group">
+            <label class="form-label">From account</label>
+            <select class="form-input" id="tf-from">${opts}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">To account</label>
+            <select class="form-input" id="tf-to">${opts}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input class="form-input" type="date" id="tf-date" value="${tDate}" max="${today()}">
+          </div>
+          <div class="form-group" style="cursor:pointer" id="tf-amount-row">
+            <label class="form-label">Amount</label>
+            <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+              <span id="tf-amount-disp" style="font-size:16px;font-weight:600;color:var(--text)">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span>
+              <span style="color:var(--text-2)">›</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Note (optional)</label>
+            <input class="form-input" type="text" id="tf-note" value="${note}" placeholder="e.g. Monthly Flex Saver deposit" maxlength="200">
+          </div>
+          ${existing ? `<button class="btn btn-danger btn-full" id="tf-del" style="margin-bottom:8px">Delete transfer</button>` : ''}
+          <button class="btn btn-primary btn-full" id="tf-save">Save</button>
+        </div>
+      </div>`;
+
+    overlay.querySelector('#tf-close').onclick = () => overlay.remove();
+    overlay.querySelector('#tf-from').value = fromId;
+    overlay.querySelector('#tf-to').value   = toId;
+    overlay.querySelector('#tf-from').onchange = e => { fromId = Number(e.target.value); };
+    overlay.querySelector('#tf-to').onchange   = e => { toId   = Number(e.target.value); };
+    overlay.querySelector('#tf-date').onchange  = e => { tDate  = e.target.value; };
+    overlay.querySelector('#tf-note').oninput   = e => { note   = e.target.value; };
+
+    overlay.querySelector('#tf-amount-row').onclick = () => {
+      openAmountPad('Transfer amount', amount, val => {
+        amount = val;
+        overlay.querySelector('#tf-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter';
+      }, { noNegative: true });
+    };
+
+    overlay.querySelector('#tf-save').onclick = async () => {
+      if (!amount || amount <= 0) { showToast('Enter an amount'); return; }
+      if (fromId === toId) { showToast('From and To must be different accounts'); return; }
+      const rec = { fromAccountId: fromId, toAccountId: toId, date: tDate, amount, note: note.trim() };
+      if (existing) {
+        await db.accountTransfers.update(existing.id, rec);
+        queueWrite('accountTransfers', existing.id).catch(() => {});
+      } else {
+        const id = await db.accountTransfers.add(rec);
+        queueWrite('accountTransfers', id).catch(() => {});
+      }
+      overlay.remove();
+      showToast(existing ? 'Transfer updated' : 'Transfer logged');
+      renderNetWealth();
+    };
+
+    overlay.querySelector('#tf-del')?.addEventListener('click', async () => {
+      await db.accountTransfers.delete(existing.id);
+      queueDelete('accountTransfers', existing.id).catch(() => {});
+      overlay.remove();
+      showToast('Transfer deleted');
+      renderNetWealth();
+    });
+  }
+  build();
+}
+
+async function openTransferListSheet() {
+  const [accounts, transfers] = await Promise.all([
+    db.accounts.toArray(),
+    db.accountTransfers.toArray(),
+  ]);
+  const accMap = Object.fromEntries(accounts.map(a => [a.id, a.name]));
+  const sorted = [...transfers].sort((a, b) => b.date.localeCompare(a.date));
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:88vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Transfers</span>
+        <button class="sheet-close" id="tl-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:8px 0;overflow-y:auto;max-height:calc(88vh - 60px)">
+        ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-text">No transfers logged yet.</div></div>` : ''}
+        ${sorted.map(t => `
+          <div class="settings-row tl-row" data-id="${t.id}" style="cursor:pointer">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px">${accMap[t.fromAccountId] ?? '?'} → ${accMap[t.toAccountId] ?? '?'}</div>
+              <div style="font-size:12px;color:var(--text-2)">${fmtDate(t.date)}${t.note ? ' · ' + t.note : ''}</div>
+            </div>
+            <span style="font-weight:700;font-size:15px;margin-left:8px">${fmt(t.amount)}</span>
+            <span class="settings-row-chevron">›</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#tl-close').onclick = () => overlay.remove();
+  overlay.querySelectorAll('.tl-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const t = transfers.find(x => x.id === Number(row.dataset.id));
+      if (t) { overlay.remove(); openTransferEditor(t); }
+    });
+  });
+}
+
+async function openAccountRatesEditor() {
+  const accounts = (await db.accounts.orderBy('sortOrder').toArray())
+    .filter(a => a.isActive !== false && ['savings','mortgage'].includes(reconcileTypeForAccount(a)));
+  let allRates = await db.accountRates.toArray();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  function build() {
+    const byAcc = {};
+    for (const r of allRates) { (byAcc[r.accountId] = byAcc[r.accountId] ?? []).push(r); }
+
+    overlay.innerHTML = `
+      <div class="sheet" style="max-height:88vh">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <span class="sheet-title">Account rates</span>
+          <button class="sheet-close" id="ar-close">✕</button>
+        </div>
+        <div class="sheet-body" style="padding:12px 16px;overflow-y:auto;max-height:calc(88vh - 60px)">
+          <div style="font-size:13px;color:var(--text-2);margin-bottom:12px;line-height:1.5">Interest rates used to estimate savings growth and mortgage capital repayment in the reconciliation. Tap a rate to edit, or add a new period when a rate changes.</div>
+          ${accounts.map(acc => {
+            const rates = (byAcc[acc.id] ?? []).sort((a, b) => b.startDate.localeCompare(a.startDate));
+            const isMtg = reconcileTypeForAccount(acc) === 'mortgage';
+            return `
+              <div style="margin-bottom:16px">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text-2);margin-bottom:4px">${acc.name}</div>
+                <div class="settings-card">
+                  ${rates.length === 0 ? `<div class="settings-row" style="color:var(--text-2);font-size:13px">No rates logged</div>` : ''}
+                  ${rates.map(r => `
+                    <div class="settings-row ar-row" data-rate-id="${r.id}" style="cursor:pointer">
+                      <div style="flex:1">
+                        <div style="font-size:14px">${r.rate}% AER${isMtg && r.monthlyPayment ? ` · £${fmt(r.monthlyPayment)}/mo payment` : ''}</div>
+                        <div style="font-size:12px;color:var(--text-2)">Until ${r.endDate ? new Date(r.endDate + 'T12:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'}) : 'indefinite'}</div>
+                      </div>
+                      <span class="settings-row-chevron">›</span>
+                    </div>`).join('')}
+                </div>
+                <button class="btn ar-add-btn" data-acc-id="${acc.id}" data-is-mtg="${isMtg}" style="margin-top:4px;width:100%;font-size:13px">+ Add rate period</button>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+
+    overlay.querySelector('#ar-close').onclick = () => overlay.remove();
+
+    overlay.querySelectorAll('.ar-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const r = allRates.find(x => x.id === Number(row.dataset.rateId));
+        const acc = accounts.find(a => a.id === r?.accountId);
+        if (r && acc) openRatePeriodForm(acc, r, async () => { allRates = await db.accountRates.toArray(); build(); });
+      });
+    });
+
+    overlay.querySelectorAll('.ar-add-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const acc = accounts.find(a => a.id === Number(btn.dataset.accId));
+        if (acc) openRatePeriodForm(acc, null, async () => { allRates = await db.accountRates.toArray(); build(); });
+      });
+    });
+  }
+  build();
+}
+
+function openRatePeriodForm(acc, existing, onSave) {
+  const isMtg = reconcileTypeForAccount(acc) === 'mortgage';
+  const overlay2 = document.createElement('div');
+  overlay2.className = 'sheet-overlay';
+  overlay2.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Add'} rate – ${acc.name}</span>
+        <button class="sheet-close" id="rpf-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Interest rate (% AER)</label>
+          <input class="form-input" type="number" id="rpf-rate" value="${existing?.rate ?? ''}" step="0.01" min="0" max="30" placeholder="e.g. 4.23">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Rate valid until (leave blank if ongoing)</label>
+          <input class="form-input" type="date" id="rpf-end" value="${existing?.endDate ?? ''}">
+        </div>
+        ${isMtg ? `
+          <div class="form-group">
+            <label class="form-label">Full monthly payment leaving your account (£)</label>
+            <input class="form-input" type="number" id="rpf-pay" value="${existing?.monthlyPayment ?? ''}" step="0.01" min="0" placeholder="e.g. 1073.17">
+          </div>` : ''}
+        ${existing ? `<button class="btn btn-danger btn-full" id="rpf-del" style="margin-bottom:8px">Delete this rate period</button>` : ''}
+        <button class="btn btn-primary btn-full" id="rpf-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay2);
+  overlay2.onclick = e => { if (e.target === overlay2) overlay2.remove(); };
+  overlay2.querySelector('#rpf-close').onclick = () => overlay2.remove();
+
+  overlay2.querySelector('#rpf-save').onclick = async () => {
+    const rateVal = parseFloat(overlay2.querySelector('#rpf-rate').value);
+    if (!rateVal || rateVal <= 0) { showToast('Enter a valid rate'); return; }
+    const endDateVal = overlay2.querySelector('#rpf-end').value || null;
+    const payVal = isMtg ? (parseFloat(overlay2.querySelector('#rpf-pay').value) || null) : undefined;
+    const rec = { accountId: acc.id, rate: rateVal, startDate: existing?.startDate ?? today(), endDate: endDateVal };
+    if (payVal != null) rec.monthlyPayment = payVal;
+    if (existing) {
+      await db.accountRates.update(existing.id, rec);
+      queueWrite('accountRates', existing.id).catch(() => {});
+    } else {
+      const id = await db.accountRates.add(rec);
+      queueWrite('accountRates', id).catch(() => {});
+    }
+    overlay2.remove();
+    showToast('Rate saved');
+    onSave?.();
+  };
+
+  overlay2.querySelector('#rpf-del')?.addEventListener('click', async () => {
+    await db.accountRates.delete(existing.id);
+    queueDelete('accountRates', existing.id).catch(() => {});
+    overlay2.remove();
+    showToast('Rate deleted');
+    onSave?.();
   });
 }
 
@@ -3417,7 +3925,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 12:30 BST (v36)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 14:45 BST (v37)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();

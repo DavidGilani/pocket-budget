@@ -17,6 +17,19 @@ db.version(1).stores({
   settings:          'key',
 });
 
+db.version(2).stores({
+  accountRates:     '++id, accountId',
+  accountTransfers: '++id, date, fromAccountId, toAccountId',
+}).upgrade(async tx => {
+  await tx.table('accountRates').bulkAdd([
+    { accountId: 3,  rate: 4.23, startDate: '2020-01-01', endDate: '2026-09-19' },
+    { accountId: 4,  rate: 4.28, startDate: '2020-01-01', endDate: '2026-10-30' },
+    { accountId: 5,  rate: 6.50, startDate: '2020-01-01', endDate: '2027-02-20' },
+    { accountId: 6,  rate: 4.75, startDate: '2020-01-01', endDate: '2027-05-04' },
+    { accountId: 12, rate: 3.91, startDate: '2020-01-01', endDate: '2030-12-31', monthlyPayment: 1073.17 },
+  ]);
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
