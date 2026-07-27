@@ -2833,16 +2833,18 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   // come straight from getCycleBreakdown – the same single source of truth the Daily
   // Budget screen uses – so nothing here is hand-entered.
   const savingsByPeriod = [];
+  // Use calcRollingBalance(cycleEnd) – the identical call the month picker uses –
+  // so "Budget left" here always matches what the user sees on the Daily Budget screen.
   let cursor = startDate;
   while (cursor <= endDate) {
     const cyc = await getCycleForDate(cursor);
     if (cyc.start >= startDate && cyc.end <= endDate) {
-      const bd = await getCycleBreakdown(cyc.start, cyc.end);
+      const rb = await calcRollingBalance(cyc.end);
       savingsByPeriod.push({
         label: new Date(cyc.start + 'T12:00:00').toLocaleDateString('en-GB', { month: 'long' }),
-        savingsTarget: bd.savings,
-        budgetLeft: bd.budgetLeft,
-        net: bd.savings + bd.budgetLeft,
+        savingsTarget: rb.monthlySavings,
+        budgetLeft: rb.balance,
+        net: rb.monthlySavings + rb.balance,
       });
     }
     cursor = addDays(cyc.end, 1);
@@ -4000,7 +4002,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 20:30 BST (v41)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 21:15 BST (v42)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
