@@ -2474,7 +2474,7 @@ async function renderNetWealth() {
 
   // Rate expiry warning
   const today = new Date();
-  const soon = new Date(today); soon.setDate(today.getDate() + 60);
+  const soon = new Date(today); soon.setDate(today.getDate() + 7);
   const soonStr = soon.toISOString().slice(0, 10);
   const todayStr = today.toISOString().slice(0, 10);
   const expiringRates = allRates.filter(r => r.endDate && r.endDate >= todayStr && r.endDate <= soonStr);
@@ -2488,8 +2488,9 @@ async function renderNetWealth() {
   }
 
   // Reconciliation panel (requires at least 2 snapshots)
+  // dates is newest-first, so dates[1] is the older (start) and dates[0] is the newer (end)
   if (dates.length >= 2) {
-    buildReconciliationHTML(dates[0], dates[1], snapshotMap, allSnapshots, accounts).then(html => {
+    buildReconciliationHTML(dates[1], dates[0], snapshotMap, allSnapshots, accounts).then(html => {
       const panel = nwScreen.querySelector('#nw-reconciliation-panel');
       if (panel) panel.innerHTML = html;
     }).catch(e => console.warn('reconciliation panel failed:', e));
@@ -2961,7 +2962,6 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
       </div>
       <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
         <div style="${subS}font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Expected (trackable accounts)</div>
-        <div style="${subS}"><span>Logged transactions (net)</span><span style="color:${clr(recon.netTransactions)}">${fmtChg(recon.netTransactions)}</span></div>
         ${recon.savingsInterest > 0.01 ? `<div style="${subS}"><span>Savings interest (est.)</span><span style="color:#43a047">+${fmt(recon.savingsInterest)}</span></div>${savingsRows}` : ''}
         ${recon.mortgageCapital > 0.01 ? `<div style="${subS}"><span>Mortgage capital benefit</span><span style="color:#43a047">+${fmt(recon.mortgageCapital)}</span></div>${mortgageRow}` : ''}
         <div style="${rowS}padding-top:6px;border-top:1px solid var(--border);font-weight:600">
@@ -3009,11 +3009,13 @@ async function openTransferEditor(existing) {
   const accounts = (await db.accounts.orderBy('sortOrder').toArray())
     .filter(a => a.isActive !== false && a.type !== 'holding' && a.type !== 'holding_archived');
 
-  let fromId = existing?.fromAccountId ?? accounts[0]?.id;
-  let toId   = existing?.toAccountId   ?? accounts[1]?.id;
-  let tDate  = existing?.date   ?? today();
-  let amount = existing?.amount ?? 0;
-  let note   = existing?.note   ?? '';
+  let fromId      = existing?.fromAccountId ?? accounts[0]?.id;
+  let toId        = existing?.toAccountId   ?? accounts[1]?.id;
+  let tDate       = existing?.date          ?? today();
+  let amount      = existing?.amount        ?? 0;
+  let note        = existing?.note          ?? '';
+  let isRecurring = existing?.isRecurring   ?? false;
+  let frequency   = existing?.frequency     ?? 'monthly';
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -3053,6 +3055,21 @@ async function openTransferEditor(existing) {
             <label class="form-label">Note (optional)</label>
             <input class="form-input" type="text" id="tf-note" value="${note}" placeholder="e.g. Monthly Flex Saver deposit" maxlength="200">
           </div>
+          <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0">
+            <label style="font-size:14px;font-weight:500">Recurring transfer</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="tf-recurring" ${isRecurring ? 'checked' : ''} style="width:18px;height:18px">
+            </label>
+          </div>
+          <div class="form-group" id="tf-freq-group" style="display:${isRecurring ? 'block' : 'none'}">
+            <label class="form-label">Frequency</label>
+            <select class="form-input" id="tf-frequency">
+              <option value="weekly" ${frequency === 'weekly' ? 'selected' : ''}>Weekly</option>
+              <option value="monthly" ${frequency === 'monthly' ? 'selected' : ''}>Monthly</option>
+              <option value="quarterly" ${frequency === 'quarterly' ? 'selected' : ''}>Quarterly</option>
+              <option value="annually" ${frequency === 'annually' ? 'selected' : ''}>Annually</option>
+            </select>
+          </div>
           ${existing ? `<button class="btn btn-danger btn-full" id="tf-del" style="margin-bottom:8px">Delete transfer</button>` : ''}
           <button class="btn btn-primary btn-full" id="tf-save">Save</button>
         </div>
@@ -3065,6 +3082,11 @@ async function openTransferEditor(existing) {
     overlay.querySelector('#tf-to').onchange   = e => { toId   = Number(e.target.value); };
     overlay.querySelector('#tf-date').onchange  = e => { tDate  = e.target.value; };
     overlay.querySelector('#tf-note').oninput   = e => { note   = e.target.value; };
+    overlay.querySelector('#tf-recurring').onchange = e => {
+      isRecurring = e.target.checked;
+      overlay.querySelector('#tf-freq-group').style.display = isRecurring ? 'block' : 'none';
+    };
+    overlay.querySelector('#tf-frequency').onchange = e => { frequency = e.target.value; };
 
     overlay.querySelector('#tf-amount-row').onclick = () => {
       openAmountPad('Transfer amount', amount, val => {
@@ -3076,7 +3098,7 @@ async function openTransferEditor(existing) {
     overlay.querySelector('#tf-save').onclick = async () => {
       if (!amount || amount <= 0) { showToast('Enter an amount'); return; }
       if (fromId === toId) { showToast('From and To must be different accounts'); return; }
-      const rec = { fromAccountId: fromId, toAccountId: toId, date: tDate, amount, note: note.trim() };
+      const rec = { fromAccountId: fromId, toAccountId: toId, date: tDate, amount, note: note.trim(), isRecurring, frequency: isRecurring ? frequency : undefined };
       if (existing) {
         await db.accountTransfers.update(existing.id, rec);
         queueWrite('accountTransfers', existing.id).catch(() => {});
@@ -3115,7 +3137,12 @@ async function openTransferListSheet() {
       <div class="sheet-handle"></div>
       <div class="sheet-header">
         <span class="sheet-title">Transfers</span>
-        <button class="sheet-close" id="tl-close">✕</button>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="icon-btn" id="tl-add" title="Log transfer">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <button class="sheet-close" id="tl-close">✕</button>
+        </div>
       </div>
       <div class="sheet-body" style="padding:8px 0;overflow-y:auto;max-height:calc(88vh - 60px)">
         ${sorted.length === 0 ? `<div class="empty-state"><div class="empty-text">No transfers logged yet.</div></div>` : ''}
@@ -3123,7 +3150,7 @@ async function openTransferListSheet() {
           <div class="settings-row tl-row" data-id="${t.id}" style="cursor:pointer">
             <div style="flex:1;min-width:0">
               <div style="font-size:14px">${accMap[t.fromAccountId] ?? '?'} → ${accMap[t.toAccountId] ?? '?'}</div>
-              <div style="font-size:12px;color:var(--text-2)">${fmtDate(t.date)}${t.note ? ' · ' + t.note : ''}</div>
+              <div style="font-size:12px;color:var(--text-2)">${fmtDate(t.date)}${t.isRecurring ? ' · 🔁 ' + t.frequency : ''}${t.note ? ' · ' + t.note : ''}</div>
             </div>
             <span style="font-weight:700;font-size:15px;margin-left:8px">${fmt(t.amount)}</span>
             <span class="settings-row-chevron">›</span>
@@ -3133,6 +3160,7 @@ async function openTransferListSheet() {
   document.body.appendChild(overlay);
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
   overlay.querySelector('#tl-close').onclick = () => overlay.remove();
+  overlay.querySelector('#tl-add').onclick = () => { overlay.remove(); openTransferEditor(null); };
   overlay.querySelectorAll('.tl-row').forEach(row => {
     row.addEventListener('click', () => {
       const t = transfers.find(x => x.id === Number(row.dataset.id));
@@ -3925,7 +3953,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 14:45 BST (v37)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 16:00 BST (v38)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
