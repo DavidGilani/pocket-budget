@@ -575,11 +575,11 @@ async function saveEntry(overlay) {
 
   if (state.entryEditId) {
     await db.transactions.update(state.entryEditId, { ...txn, updatedAt: new Date().toISOString() });
-    await queueWrite('transactions', state.entryEditId);
+    queueWrite('transactions', state.entryEditId).catch(() => {});
     showToast('Transaction updated');
   } else {
     const newId = await db.transactions.add(txn);
-    await queueWrite('transactions', newId);
+    queueWrite('transactions', newId).catch(() => {});
     showToast('Saved');
   }
 
@@ -851,7 +851,7 @@ async function showTxnMenu(id) {
   overlay.querySelector('#txn-del-btn').onclick = async () => {
     if (txn.distributionId) { showToast('Open the parent Big Expense or Extra Income to delete'); overlay.remove(); return; }
     await db.transactions.delete(id);
-    await queueDelete('transactions', id);
+    queueDelete('transactions', id).catch(() => {});
     overlay.remove();
     showToast('Deleted');
     renderTransactions();
@@ -3417,7 +3417,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 26 Jul 2026 at 21:45 BST (v34)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 12:30 BST (v36)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
