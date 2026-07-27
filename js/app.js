@@ -2500,7 +2500,7 @@ async function renderNetWealth() {
       panel.innerHTML = '<div style="padding:20px 14px;text-align:center;color:var(--text-2);font-size:13px">Loading reconciliation…</div>';
       const endDate   = dates[reconIdx];
       const startDate = dates[reconIdx + 1];
-      buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, reconIdx > 0, reconIdx < maxIdx)
+      buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, reconIdx < maxIdx, reconIdx > 0)
         .then(html => {
           if (!panel.isConnected) return;
           panel.innerHTML = html;
@@ -2941,7 +2941,7 @@ async function calcReconciliation(startDate, endDate, snapshotMap, allSnapshots,
   };
 }
 
-async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, hasPrev = false, hasNext = false) {
+async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnapshots, accounts, canOlder = false, canNewer = false) {
   const recon = await calcReconciliation(startDate, endDate, snapshotMap, allSnapshots, accounts);
   const fmtChg = v => `${v >= 0 ? '+' : ''}${fmt(v)}`;
   const clr = v => v >= 0 ? '#43a047' : '#e53935';
@@ -2995,9 +2995,9 @@ async function buildReconciliationHTML(startDate, endDate, snapshotMap, allSnaps
 
       <div style="${pad}${BD}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <button id="recon-older" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${hasPrev ? 'var(--text)' : 'var(--border)'};pointer-events:${hasPrev ? 'auto' : 'none'}">‹</button>
+          <button id="recon-older" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${canOlder ? 'var(--text)' : 'var(--border)'};pointer-events:${canOlder ? 'auto' : 'none'}">‹</button>
           <div style="${hdgS}margin-bottom:0">Reconciliation · ${lbl}</div>
-          <button id="recon-newer" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${hasNext ? 'var(--text)' : 'var(--border)'};pointer-events:${hasNext ? 'auto' : 'none'}">›</button>
+          <button id="recon-newer" style="background:none;border:none;font-size:18px;padding:0 4px;cursor:pointer;color:${canNewer ? 'var(--text)' : 'var(--border)'};pointer-events:${canNewer ? 'auto' : 'none'}">›</button>
         </div>
         <div style="${rowS}font-weight:700;font-size:15px">
           <span>Actual net wealth change</span>
@@ -4022,7 +4022,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 22:00 BST (v43)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 27 Jul 2026 at 22:30 BST (v44)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
