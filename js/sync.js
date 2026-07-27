@@ -11,6 +11,7 @@ const TABLES = [
   'savingsTargets', 'distributions', 'accounts', 'accountSnapshots',
   'friendHoldings', 'friendTransactions', 'accountRates', 'accountTransfers',
   'mortgageOverpayments', 'helpToBuyPayments', 'investmentContributions',
+  'charityDonations',
 ];
 
 // Upload order: smallest + most-precious tables first, so that if the Firestore
@@ -20,7 +21,8 @@ const TABLES = [
 const UPLOAD_ORDER = [
   'settings', 'friendHoldings', 'accounts', 'categories', 'savingsTargets',
   'recurringIncome', 'recurringExpenses', 'friendTransactions',
-  'accountRates', 'accountTransfers', 'mortgageOverpayments', 'accountSnapshots', 'distributions', 'transactions',
+  'accountRates', 'accountTransfers', 'mortgageOverpayments', 'helpToBuyPayments',
+  'investmentContributions', 'charityDonations', 'accountSnapshots', 'distributions', 'transactions',
 ];
 
 // Firestore rejects any document containing an `undefined` field value, and it

@@ -75,6 +75,7 @@ async function renderView(view) {
       case 'mortgageFree': await renderMortgageFree(); break;
       case 'helpToBuy':    await renderHelpToBuy(); break;
       case 'investments':  await renderInvestments(); break;
+      case 'charity':      await renderCharity(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
@@ -3671,12 +3672,62 @@ async function computeHelpToBuyProjection() {
   const totalBoughtBack = sorted.reduce((s, p) => s + (Number(p.amount) || 0), 0);
   const totalPctBought = sorted.reduce((s, p) => s + (Number(p.percentBought) || 0), 0);
 
+  // Cumulative interest saved over time: each buy-back permanently lowers the
+  // monthly interest, so we walk month-by-month from the first buy-back to now,
+  // accumulating the running monthly saving.
+  const interestSavedSeries = [];
+  if (propertyValue > 0 && sorted.length) {
+    const pctByMonth = {};
+    for (const pmt of sorted) {
+      const mk = pmt.date.slice(0, 7);
+      pctByMonth[mk] = (pctByMonth[mk] || 0) + (Number(pmt.percentBought) || 0);
+    }
+    const first = sorted[0].date.slice(0, 7);
+    let y = +first.slice(0, 4), m = +first.slice(5, 7);
+    const curY = now.getFullYear(), curM = now.getMonth() + 1;
+    let cumPct = 0, cumSaved = 0;
+    while (y < curY || (y === curY && m <= curM)) {
+      const mk = `${y}-${String(m).padStart(2, '0')}`;
+      cumPct += pctByMonth[mk] || 0;
+      cumSaved += propertyValue * (cumPct / 100) * (rate / 100) / 12;
+      interestSavedSeries.push({ month: mk, saved: cumSaved });
+      m++; if (m > 12) { m = 1; y++; }
+    }
+  }
+
   return {
     propertyValue, equityPercent, rate, tranchePercent, lastPurchaseDate,
     equityLoanValue, monthlyInterest, annualInterest, trancheCost,
     payments: sorted, interestSavedToDate, totalBoughtBack, totalPctBought,
-    configured: propertyValue > 0,
+    interestSavedSeries, configured: propertyValue > 0,
   };
+}
+
+function drawHelpToBuyChart(canvas, series) {
+  if (!canvas || typeof Chart === 'undefined' || series.length < 2) return;
+  const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const labels = series.map(pt => {
+    const [yy, mm] = pt.month.split('-');
+    return (mm === '01' || pt === series[0]) ? `${MON[+mm]} ${yy.slice(2)}` : '';
+  });
+  if (canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Interest saved', data: series.map(pt => pt.saved), borderColor: '#43a047', backgroundColor: 'rgba(67,160,71,0.12)', borderWidth: 2.5, fill: true, tension: 0.3, pointRadius: 0 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 90, font: { size: 9 }, autoSkip: false } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(1)}k` : `£${v.toFixed(0)}` } },
+      },
+    },
+  });
 }
 
 async function renderHelpToBuy() {
@@ -3723,6 +3774,10 @@ async function renderHelpToBuy() {
         Completing the buy-back would save <b style="color:#43a047">${fmt(p.annualInterest)}/yr</b> in interest.
       </div>` : ''}
 
+      ${p.interestSavedSeries.length > 1 ? `
+      <div style="padding:12px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Interest saved over time</div>
+      <div class="chart-wrap" style="height:190px;margin:4px 12px"><canvas id="htb-chart"></canvas></div>` : ''}
+
       <div style="padding:12px 12px 8px">
         <button class="btn btn-primary btn-full" id="htb-log">＋ Log equity buy-back</button>
       </div>
@@ -3758,6 +3813,7 @@ async function renderHelpToBuy() {
     const pm = p.payments.find(x => x.id === Number(r.dataset.id));
     if (pm) openHelpToBuyPaymentEditor(pm, reRender, p);
   });
+  drawHelpToBuyChart(viewContainer.querySelector('#htb-chart'), p.interestSavedSeries);
 }
 
 async function openHelpToBuyPaymentEditor(existing, onSaved, proj) {
@@ -3916,11 +3972,15 @@ async function computeInvestmentsSummary() {
   const totalAnnualInterest = perAccount.reduce((s, a) => s + (a.annualInterest || 0), 0);
   const totalContribThisYear = perAccount.reduce((s, a) => s + a.contribThisYear, 0);
 
-  // Total invested over time (sum across these accounts per snapshot date)
-  const series = dates.map(d => ({
-    date: d,
-    total: invAccounts.reduce((s, a) => s + (snapMap[d]?.[a.id] ?? 0), 0),
-  })).filter(pt => pt.total !== 0);
+  // Total invested over time, split into cash vs stocks (for the stacked chart)
+  const series = dates.map(d => {
+    let cash = 0, stocks = 0;
+    for (const a of invAccounts) {
+      const v = snapMap[d]?.[a.id] ?? 0;
+      if (a.type === 'savings') cash += v; else stocks += v;
+    }
+    return { date: d, cash, stocks, total: cash + stocks };
+  }).filter(pt => pt.total !== 0);
 
   // Monthly cost of living target (from recurring expenses), for the FIRE goal line
   return {
@@ -3934,20 +3994,23 @@ function drawInvestmentsChart(canvas, series) {
   if (!canvas || typeof Chart === 'undefined' || series.length < 2) return;
   const labels = series.map(pt => new Date(pt.date + 'T12:00:00').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }));
   if (canvas._chart) canvas._chart.destroy();
+  // Stacked areas: stocks on the bottom, cash on top — combined height = total,
+  // and the split shows the cash-vs-stocks proportion over time.
   canvas._chart = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Total invested', data: series.map(pt => pt.total), borderColor: '#43a047', backgroundColor: 'rgba(67,160,71,0.10)', borderWidth: 2.5, fill: true, tension: 0.3, pointRadius: 3 },
+        { label: 'Stocks', data: series.map(pt => pt.stocks), borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.55)', borderWidth: 1.5, fill: true, tension: 0.3, pointRadius: 0 },
+        { label: 'Cash', data: series.map(pt => pt.cash), borderColor: '#43a047', backgroundColor: 'rgba(67,160,71,0.55)', borderWidth: 1.5, fill: true, tension: 0.3, pointRadius: 0 },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
+      plugins: { legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 12, padding: 10 } } },
       scales: {
         x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 90, font: { size: 9 } } },
-        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(0)}k` : `£${v.toFixed(0)}` } },
+        y: { stacked: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? `£${(v / 1000).toFixed(0)}k` : `£${v.toFixed(0)}` } },
       },
     },
   });
@@ -4113,6 +4176,226 @@ async function openInvestmentContributionEditor(existing, onSaved, summary) {
     queueDelete('investmentContributions', existing.id).catch(() => {});
     overlay.remove();
     showToast('Contribution deleted');
+    onSaved?.();
+  });
+}
+
+// ── Financial goals: charity donations ────────────────────────────────────────
+// Each row is a monthly commitment to a charity active over [startDate, endDate]
+// (endDate null = ongoing). Total donated to a charity = amount × months active,
+// summed across its commitments.
+
+// Whole months a commitment has been active (inclusive of both start & end month).
+function charityMonthsActive(startDate, endDate) {
+  if (!startDate) return 0;
+  const end = endDate || today();
+  const [sy, sm] = startDate.split('-').map(Number);
+  const [ey, em] = end.split('-').map(Number);
+  return Math.max(0, (ey - sy) * 12 + (em - sm) + 1);
+}
+
+const CHARITY_SEED = [
+  { charity: 'Labour Party',              amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Pump Aid',                  amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Stonewall',                 amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Fitzrovia Youth in Action', amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Give Directly',             amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Big Issue Foundation',      amount: 15, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Mermaids',                  amount: 13, startDate: '2023-06-01', endDate: '2026-02-28' },
+  { charity: 'Give Directly',             amount: 30, startDate: '2026-03-01', endDate: null },
+  { charity: 'Give Well top charities fund', amount: 60, startDate: '2026-03-01', endDate: null },
+  { charity: 'Pump Aid',                  amount: 15, startDate: '2026-03-01', endDate: null },
+];
+
+async function computeCharitySummary() {
+  // One-time seed of the known donation history (guarded by a synced flag).
+  if (!(await getSetting('charitySeeded'))) {
+    const existingCount = await db.charityDonations.count();
+    if (existingCount === 0) {
+      for (const row of CHARITY_SEED) {
+        const id = await db.charityDonations.add({ ...row });
+        queueWrite('charityDonations', id).catch(() => {});
+      }
+    }
+    await setSetting('charitySeeded', true);
+    queueWrite('settings', 'charitySeeded').catch(() => {});
+  }
+
+  const rows = await db.charityDonations.toArray();
+  const t = today();
+
+  const enriched = rows.map(r => {
+    const months = charityMonthsActive(r.startDate, r.endDate);
+    const total = (Number(r.amount) || 0) * months;
+    const active = r.startDate <= t && (!r.endDate || r.endDate >= t);
+    return { ...r, months, total, active };
+  });
+
+  // Aggregate total donated per charity (across all commitments)
+  const byCharity = {};
+  for (const e of enriched) {
+    if (!byCharity[e.charity]) byCharity[e.charity] = { charity: e.charity, total: 0, active: false, activeAmount: 0 };
+    byCharity[e.charity].total += e.total;
+    if (e.active) { byCharity[e.charity].active = true; byCharity[e.charity].activeAmount += (Number(e.amount) || 0); }
+  }
+  const ranking = Object.values(byCharity).sort((a, b) => b.total - a.total);
+
+  const grandTotal = enriched.reduce((s, e) => s + e.total, 0);
+  const currentMonthly = enriched.filter(e => e.active).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+
+  // Commitments list: active first, then by most recent start
+  const commitments = enriched.sort((a, b) => (b.active - a.active) || (b.startDate || '').localeCompare(a.startDate || ''));
+
+  return { ranking, grandTotal, currentMonthly, commitments };
+}
+
+async function renderCharity() {
+  const s = await computeCharitySummary();
+  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  const maxTotal = Math.max(1, ...s.ranking.map(r => r.total));
+  const rankRows = s.ranking.map(r => `
+    <div style="padding:8px 14px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <span style="font-size:14px">${r.charity}${r.active ? ` <span style="font-size:11px;color:#43a047">· ${fmt(r.activeAmount)}/mo now</span>` : ''}</span>
+        <span style="font-weight:700;font-size:14px">${fmt(r.total)}</span>
+      </div>
+      <div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${(r.total / maxTotal * 100).toFixed(1)}%;background:#e91e8c"></div>
+      </div>
+    </div>`).join('');
+
+  const cList = s.commitments.map(c => `
+    <div class="settings-row ch-row" data-id="${c.id}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${c.charity} · ${fmt(Number(c.amount) || 0)}/mo</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(c.startDate)} → ${c.endDate ? fmtDate(c.endDate) : 'ongoing'} · ${c.months} mo · ${fmt(c.total)} total${c.active ? ' · active' : ''}</div>
+      </div>
+      <span class="settings-row-chevron">›</span>
+    </div>`).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">${back}<span class="screen-title">Charity donations</span><div style="width:34px"></div></div>
+
+      <div style="text-align:center;padding:16px 16px 6px">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Total donated to date</div>
+        <div style="font-size:32px;font-weight:800">${fmt(s.grandTotal)}</div>
+        <div style="font-size:13px;color:#e91e8c;margin-top:2px">Currently giving ${fmt(s.currentMonthly)}/mo</div>
+      </div>
+
+      <div style="padding:12px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Total given by charity</div>
+      ${s.ranking.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">No donations logged yet.</div>`
+        : `<div class="settings-card" style="margin:4px 12px;padding:2px 0">${rankRows}</div>`}
+
+      <div style="padding:14px 12px 8px">
+        <button class="btn btn-primary btn-full" id="ch-log">＋ Log a donation change</button>
+      </div>
+
+      <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">All commitments</div>
+      ${s.commitments.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet.</div>`
+        : `<div class="settings-card" style="margin:4px 12px">${cList}</div>`}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const reRender = () => renderCharity();
+  viewContainer.querySelector('#ch-log').onclick = () => openCharityEditor(null, reRender);
+  viewContainer.querySelectorAll('.ch-row').forEach(r => r.onclick = () => {
+    const c = s.commitments.find(x => x.id === Number(r.dataset.id));
+    if (c) openCharityEditor(c, reRender);
+  });
+}
+
+async function openCharityEditor(existing, onSaved) {
+  let charity = existing?.charity ?? '';
+  let amount = existing?.amount ?? 0;
+  let startDate = existing?.startDate ?? today();
+  let endDate = existing?.endDate ?? null;
+  let ongoing = !existing?.endDate;
+  let note = existing?.note ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Log'} donation</span>
+        <button class="sheet-close" id="ch-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Charity</label>
+          <input class="form-input" type="text" id="ch-name" value="${charity}" placeholder="e.g. Give Directly" maxlength="120">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="ch-amount-row">
+          <label class="form-label">Monthly amount</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ch-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Start date</label>
+          <input class="form-input" type="date" id="ch-start" value="${startDate}" max="${today()}">
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0">
+          <label style="font-size:14px;font-weight:500">Still giving (ongoing)</label>
+          <input type="checkbox" id="ch-ongoing" ${ongoing ? 'checked' : ''} style="width:18px;height:18px">
+        </div>
+        <div class="form-group" id="ch-end-group" style="display:${ongoing ? 'none' : 'block'}">
+          <label class="form-label">End date</label>
+          <input class="form-input" type="date" id="ch-end" value="${endDate ?? today()}" max="${today()}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="ch-note" value="${note}" placeholder="e.g. AmEx card monthly" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="ch-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="ch-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#ch-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ch-name').oninput = e => { charity = e.target.value; };
+  overlay.querySelector('#ch-start').onchange = e => { startDate = e.target.value; };
+  overlay.querySelector('#ch-note').oninput = e => { note = e.target.value; };
+  overlay.querySelector('#ch-end').onchange = e => { endDate = e.target.value; };
+  overlay.querySelector('#ch-ongoing').onchange = e => {
+    ongoing = e.target.checked;
+    overlay.querySelector('#ch-end-group').style.display = ongoing ? 'none' : 'block';
+  };
+  overlay.querySelector('#ch-amount-row').onclick = () => openAmountPad('Monthly amount', amount, v => { amount = Math.max(0, v); overlay.querySelector('#ch-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
+
+  overlay.querySelector('#ch-save').onclick = async () => {
+    if (!charity.trim()) { showToast('Enter a charity name'); return; }
+    if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
+    const rec = {
+      charity: charity.trim(), amount: amount || 0, startDate,
+      endDate: ongoing ? null : (overlay.querySelector('#ch-end').value || null),
+      note: note.trim(),
+    };
+    if (existing) {
+      await db.charityDonations.update(existing.id, rec);
+      queueWrite('charityDonations', existing.id).catch(() => {});
+    } else {
+      const id = await db.charityDonations.add(rec);
+      queueWrite('charityDonations', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'Donation updated' : 'Donation logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#ch-del')?.addEventListener('click', async () => {
+    await db.charityDonations.delete(existing.id);
+    queueDelete('charityDonations', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Donation deleted');
     onSaved?.();
   });
 }
@@ -4892,6 +5175,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-mortgage-free"><span class="settings-row-icon">🏡</span><span class="settings-row-label">Mortgage free</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-help-to-buy"><span class="settings-row-icon">🔑</span><span class="settings-row-label">Help to Buy</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-investments"><span class="settings-row-icon">📈</span><span class="settings-row-label">Investments</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-charity"><span class="settings-row-icon">💝</span><span class="settings-row-label">Charity donations</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -4904,7 +5188,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 01:00 BST (v48)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 01:45 BST (v49)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -4917,6 +5201,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
   viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
   viewContainer.querySelector('#nav-investments').onclick = () => navigate('investments');
+  viewContainer.querySelector('#nav-charity').onclick = () => navigate('charity');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;

@@ -43,6 +43,12 @@ db.version(4).stores({
   investmentContributions: '++id, date, accountId',
 });
 
+// Financial goals: charity donations. Each row is a monthly commitment to a
+// charity, active over [startDate, endDate] (endDate null = ongoing).
+db.version(5).stores({
+  charityDonations: '++id, charity, startDate',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
