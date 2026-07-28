@@ -49,14 +49,37 @@ function animateCounter(el, from, to, duration = 420) {
 // restores where you were rather than jumping back to the top.
 const scrollPositions = {};
 
-function navigate(view, params = {}) {
+// Back stack: every forward navigation records the view we came from, so the
+// top-left "‹" back button returns to wherever the user actually arrived from
+// (e.g. Settings vs the Daily Budget summary), not a hardcoded destination.
+const navStack = [];
+
+// Where a page's back button lands when the stack is empty (e.g. the app was
+// opened directly onto it, or state was reset).
+const BACK_FALLBACK = {
+  breakdown: 'balance', yearlyTrends: 'analysis',
+};
+const backFallbackFor = view => BACK_FALLBACK[view] ?? 'settings';
+
+function navigate(view, params = {}, isBack = false) {
   // Save the outgoing view's scroll position before we leave it.
   if (state.view) scrollPositions[state.view] = viewContainer.scrollTop;
   if (view === 'analysis' && state.view !== 'analysis') state.analysisViewingCycle = null;
+  // Record the view we're leaving so "back" can return to it. Back navigations
+  // don't push (they're unwinding the stack), and re-navigating to the same
+  // view is a no-op for the stack.
+  if (!isBack && state.view && state.view !== view) navStack.push(state.view);
   Object.assign(state, params);
   state.view = view;
   navBtns.forEach(b => b.classList.toggle('active', b.dataset.view === view));
   renderView(view);
+}
+
+// Go back to the previous view (browser-style). Used by every top-left back
+// button and by the swipe-right-from-edge gesture.
+function goBack() {
+  const prev = navStack.pop() || backFallbackFor(state.view);
+  navigate(prev, {}, true);
 }
 
 async function renderView(view) {
@@ -76,6 +99,7 @@ async function renderView(view) {
       case 'helpToBuy':    await renderHelpToBuy(); break;
       case 'investments':  await renderInvestments(); break;
       case 'charity':      await renderCharity(); break;
+      case 'pension':      await renderPension(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
@@ -888,7 +912,7 @@ async function renderBreakdown() {
   viewContainer.innerHTML = `
     <div class="breakdown-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('balance')">
+        <button class="icon-btn" onclick="window.app.goBack()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <span class="screen-title">Daily Budget</span>
@@ -1020,7 +1044,7 @@ async function renderRecurring() {
   viewContainer.innerHTML = `
     <div class="recurring-screen">
       <div class="recurring-hero" style="background:${heroColor};position:relative">
-        <button class="icon-btn" onclick="window.app.navigate('settings')" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
+        <button class="icon-btn" onclick="window.app.goBack()" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <div class="recurring-hero-icon">${tab === 'expenses' ? '🏠' : '💵'}</div>
@@ -1119,7 +1143,7 @@ async function renderHouseholdBills() {
   viewContainer.innerHTML = `
     <div class="recurring-screen">
       <div class="recurring-hero" style="background:linear-gradient(160deg,#1565c0 0%,#1a73e8 100%);position:relative">
-        <button class="icon-btn" onclick="window.app.navigate('settings')" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
+        <button class="icon-btn" onclick="window.app.goBack()" style="position:absolute;top:52px;left:12px;color:white;opacity:0.9">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <div class="recurring-hero-icon">🏠</div>
@@ -1816,7 +1840,7 @@ async function renderYearlyTrends() {
     },
   });
 
-  viewContainer.querySelector('#yt-back').onclick = () => navigate('analysis');
+  viewContainer.querySelector('#yt-back').onclick = () => goBack();
   viewContainer.querySelector('#yt-prev').onclick = () => { state.yearlyTrendsYear = year - 1; renderYearlyTrends(); };
   viewContainer.querySelector('#yt-next')?.addEventListener('click', () => {
     if (year < new Date().getFullYear()) { state.yearlyTrendsYear = year + 1; renderYearlyTrends(); }
@@ -1847,7 +1871,7 @@ async function renderDistributions() {
   viewContainer.innerHTML = `
     <div class="distributions-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="screen-title">Big Expenses</span>
         <button class="icon-btn" id="dist-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
@@ -1875,7 +1899,7 @@ async function renderExtraIncomes() {
   viewContainer.innerHTML = `
     <div class="distributions-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="screen-title">Extra Incomes</span>
         <button class="icon-btn" id="extra-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
@@ -2428,7 +2452,7 @@ async function renderNetWealth() {
   viewContainer.innerHTML = `
     <div class="settings-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('settings')">
+        <button class="icon-btn" onclick="window.app.goBack()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <span class="screen-title">Net Wealth</span>
@@ -3481,7 +3505,7 @@ async function renderMortgageFree() {
     viewContainer.innerHTML = `
       <div class="settings-screen">
         <div class="screen-header">
-          <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
           <span class="screen-title">Mortgage free</span>
           <div style="width:34px"></div>
         </div>
@@ -3508,7 +3532,7 @@ async function renderMortgageFree() {
   viewContainer.innerHTML = `
     <div class="settings-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="screen-title">Mortgage free</span>
         <div style="width:34px"></div>
       </div>
@@ -3768,7 +3792,7 @@ function drawHelpToBuyChart(canvas, series) {
 
 async function renderHelpToBuy() {
   const p = await computeHelpToBuyProjection();
-  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
 
   const row = (label, value, id) => `
     <div class="settings-row"${id ? ` id="${id}" style="cursor:pointer"` : ''}>
@@ -4056,7 +4080,7 @@ function drawInvestmentsChart(canvas, series) {
 
 async function renderInvestments() {
   const s = await computeInvestmentsSummary();
-  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
 
   const cashAccs = s.perAccount.filter(a => a.type === 'savings');
   const stockAccs = s.perAccount.filter(a => a.type === 'investment');
@@ -4291,7 +4315,7 @@ async function computeCharitySummary() {
 
 async function renderCharity() {
   const s = await computeCharitySummary();
-  const back = `<button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
 
   const maxTotal = Math.max(1, ...s.ranking.map(r => r.total));
   const rankRows = s.ranking.map(r => `
@@ -4444,6 +4468,373 @@ async function openCharityEditor(existing, onSaved) {
     showToast('Donation deleted');
     onSaved?.();
   });
+}
+
+// ── Financial goals: pension maximising ───────────────────────────────────────
+// Logs APC (Additional Pension Contribution) purchases — each buys a chunk of
+// extra *annual* pension into the LGPS pot. There's a lifetime cap on how much
+// extra annual pension you can buy this way (£9,054 for 2026/7, revised yearly);
+// the core goal is to reach that cap. The page also surfaces the headline
+// benefits from the latest annual pension statement (current pension + what it's
+// projected to be at various retirement ages).
+
+// Known APC history (seeded once, then user-editable). `pensionBought` is the
+// extra yearly pension that purchase adds; costs are as originally paid.
+const APC_SEED = [
+  { date: '2020-01-01', cost: 1500,   pensionBought: 218.02,  contract: 'Single',                 note: 'One-off lump sum' },
+  { date: '2020-06-01', cost: 266.67, pensionBought: 445.49,  contract: '1 year',                 note: '' },
+  { date: '2021-08-01', cost: 350.22, pensionBought: 573.00,  contract: '1 year',                 note: '' },
+  { date: '2022-08-01', cost: 771.14, pensionBought: 2761.16, contract: 'Finished 31/07/25',      note: '£600/mo, rose to £771.14/mo from 01/04/24', endDate: '2025-07-31' },
+  { date: '2025-10-01', cost: 800,    pensionBought: 2742.54, contract: 'Due to finish 30/09/28',  note: '', endDate: '2028-09-30' },
+];
+
+// Headline figures from the annual pension statement (31 Mar 2026). Stored as
+// settings so they can be refreshed each year without a code change.
+const PENSION_DEFAULTS = {
+  pensionMaxApc: 9054,           // max extra annual pension buyable via APC (2026/7)
+  pensionCurrentAnnual: 18200.36,// current yearly pension at the statement date
+  pensionStatementDate: '2026-03-31',
+  pensionPensionablePay: 69892,
+  pensionDeathGrant: 209676,
+  pensionPartnerPension: 18433.96,
+  pensionEstimates: JSON.stringify([
+    { label: 'Age 55', year: 2045, pension: 27533.58, maxLumpSum: 118001.04, maxLumpPension: 17700.16 },
+    { label: 'Age 60', year: 2050, pension: 39179.29, maxLumpSum: 167911.20, maxLumpPension: 25186.69 },
+    { label: 'Age 65', year: 2055, pension: 54791.82, maxLumpSum: 234822.00, maxLumpPension: 35223.32 },
+    { label: 'State pension', year: 2058, pension: 67622.25, maxLumpSum: 268275.00, maxLumpPension: 45266.00 },
+  ]),
+};
+
+async function computePensionSummary() {
+  // One-time seed of the known APC history + statement figures (guarded flag).
+  if (!(await getSetting('pensionSeeded'))) {
+    if ((await db.apcPurchases.count()) === 0) {
+      for (const row of APC_SEED) {
+        const id = await db.apcPurchases.add({ ...row });
+        queueWrite('apcPurchases', id).catch(() => {});
+      }
+    }
+    for (const [k, v] of Object.entries(PENSION_DEFAULTS)) {
+      if ((await getSetting(k)) == null) {
+        await setSetting(k, v);
+        queueWrite('settings', k).catch(() => {});
+      }
+    }
+    await setSetting('pensionSeeded', true);
+    queueWrite('settings', 'pensionSeeded').catch(() => {});
+  }
+
+  const purchases = (await db.apcPurchases.toArray())
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+  const maxApc = Number(await getSetting('pensionMaxApc')) || PENSION_DEFAULTS.pensionMaxApc;
+  const currentAnnual = Number(await getSetting('pensionCurrentAnnual')) || 0;
+  const statementDate = (await getSetting('pensionStatementDate')) || PENSION_DEFAULTS.pensionStatementDate;
+  const deathGrant = Number(await getSetting('pensionDeathGrant')) || 0;
+  const partnerPension = Number(await getSetting('pensionPartnerPension')) || 0;
+  let estimates = [];
+  try { estimates = JSON.parse((await getSetting('pensionEstimates')) || PENSION_DEFAULTS.pensionEstimates); } catch { estimates = []; }
+
+  const totalBought = purchases.reduce((s, p) => s + (Number(p.pensionBought) || 0), 0);
+  const remaining = Math.max(0, maxApc - totalBought);
+  const pctToMax = maxApc > 0 ? Math.min(100, totalBought / maxApc * 100) : 0;
+  const t = today();
+  const enriched = purchases.map(p => ({
+    ...p,
+    active: !p.endDate || p.endDate >= t,
+  })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  return {
+    purchases: enriched, totalBought, maxApc, remaining, pctToMax,
+    currentAnnual, statementDate, estimates, deathGrant, partnerPension,
+  };
+}
+
+function drawPensionChart(canvas, currentAnnual, estimates) {
+  if (!canvas || typeof Chart === 'undefined' || !estimates.length) return;
+  const labels = ['Now', ...estimates.map(e => e.label)];
+  const data = [currentAnnual, ...estimates.map(e => Number(e.pension) || 0)];
+  const colours = ['#9e9e9e', ...estimates.map(() => '#3f51b5')];
+  if (canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: colours, borderRadius: 6, maxBarThickness: 46 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => `${fmt(c.parsed.y)}/yr` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 10 }, callback: v => v >= 1000 ? `£${(v / 1000).toFixed(0)}k` : `£${v}` } },
+      },
+    },
+  });
+}
+
+async function renderPension() {
+  const s = await computePensionSummary();
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  const apcList = s.purchases.map(p => `
+    <div class="settings-row apc-row" data-id="${p.id}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px">${fmtDate(p.date)} · +${fmt(Number(p.pensionBought) || 0)}/yr pension</div>
+        <div style="font-size:12px;color:var(--text-2)">${p.contract || ''}${p.cost ? ` · ${fmt(Number(p.cost) || 0)} cost` : ''}${p.active ? ' · active' : ''}${p.note ? `<br>${p.note}` : ''}</div>
+      </div>
+      <span class="settings-row-chevron">›</span>
+    </div>`).join('');
+
+  const estRows = s.estimates.map((e, i) => `
+    <div class="settings-row pen-est-row" data-idx="${i}" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px;font-weight:600">${e.label}${e.year ? ` <span style="font-weight:400;color:var(--text-2)">(${e.year})</span>` : ''}</div>
+        <div style="font-size:12px;color:var(--text-2)">Or max lump ${fmt(Number(e.maxLumpSum) || 0)} + ${fmt(Number(e.maxLumpPension) || 0)}/yr</div>
+      </div>
+      <span style="font-weight:700;font-size:15px;color:#3f51b5">${fmt(Number(e.pension) || 0)}<span style="font-size:11px;font-weight:400;color:var(--text-2)">/yr</span></span>
+    </div>`).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">${back}<span class="screen-title">Pension maximising</span><div style="width:34px"></div></div>
+
+      <div style="text-align:center;padding:16px 16px 6px">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Extra pension bought via APCs</div>
+        <div style="font-size:34px;font-weight:800;color:#3f51b5;line-height:1.1;margin-top:4px">${fmt(s.totalBought)}<span style="font-size:16px;color:var(--text-2)">/yr</span></div>
+        <div style="font-size:13px;color:var(--text-2);margin-top:2px">of ${fmt(s.maxApc)}/yr lifetime cap</div>
+      </div>
+
+      <div style="padding:6px 16px 12px">
+        <div style="height:12px;background:var(--bg);border-radius:6px;overflow:hidden">
+          <div style="height:100%;width:${s.pctToMax.toFixed(1)}%;background:linear-gradient(90deg,#3f51b5,#7986cb)"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);margin-top:6px">
+          <span>${s.pctToMax.toFixed(0)}% of cap reached</span>
+          <span>${fmt(s.remaining)}/yr left to buy</span>
+        </div>
+      </div>
+
+      <div class="settings-card" style="margin:4px 12px 0">
+        <div class="settings-row" id="pen-max"><span class="settings-row-label">APC lifetime cap (per year)</span><span style="color:var(--text-2)">${fmt(s.maxApc)} ›</span></div>
+      </div>
+      <div style="padding:6px 16px 0;font-size:11px;color:var(--text-2)">The cap is revised each year — update it from wypf.org.uk (APC page).</div>
+
+      <div class="settings-section-title" style="padding:16px 16px 6px">APC purchases</div>
+      <button class="btn btn-primary btn-full" id="apc-log" style="margin:0 12px 6px;width:calc(100% - 24px)">+ Log an APC purchase</button>
+      ${s.purchases.length === 0
+        ? `<div style="padding:8px 16px;color:var(--text-2);font-size:13px">None yet. Log your first APC above.</div>`
+        : `<div class="settings-card" style="margin:4px 12px">${apcList}</div>`}
+
+      <div class="settings-section-title" style="padding:20px 16px 6px">Your pension benefits</div>
+      <div style="padding:0 16px 4px;font-size:12px;color:var(--text-2)">Current yearly pension as of ${fmtDate(s.statementDate)}</div>
+      <div class="settings-card" style="margin:4px 12px 0">
+        <div class="settings-row" id="pen-current"><span class="settings-row-label">Current yearly pension</span><span style="color:var(--text-2)">${fmt(s.currentAnnual)} ›</span></div>
+      </div>
+
+      <div style="padding:16px 16px 4px;font-size:13px;font-weight:600">Projected pension by retirement age</div>
+      <div style="height:200px;padding:0 12px 8px"><canvas id="pen-chart"></canvas></div>
+      <div class="settings-card" style="margin:4px 12px">${estRows}</div>
+      <div style="padding:6px 16px 0;font-size:11px;color:var(--text-2)">Standard yearly pension shown. Tap a row to give up pension for a bigger one-off lump sum instead, or to update figures from a new statement.</div>
+
+      <div class="settings-section-title" style="padding:20px 16px 6px">If you die before leaving this job</div>
+      <div class="settings-card" style="margin:4px 12px 0">
+        <div class="settings-row"><span class="settings-row-label">One-off death grant</span><span style="font-weight:600">${fmt(s.deathGrant)}</span></div>
+        <div class="settings-row"><span class="settings-row-label">Partner's pension (yearly)</span><span style="font-weight:600">${fmt(s.partnerPension)}</span></div>
+      </div>
+
+      <div style="padding-bottom:90px"></div>
+    </div>`;
+
+  const reRender = () => renderPension();
+  viewContainer.querySelector('#pen-max').onclick = () => openAmountPad('APC lifetime cap (per year)', s.maxApc, v => {
+    setSetting('pensionMaxApc', Math.max(0, v)).then(() => { queueWrite('settings', 'pensionMaxApc').catch(() => {}); reRender(); });
+  }, { noNegative: true });
+  viewContainer.querySelector('#pen-current').onclick = () => openAmountPad('Current yearly pension', s.currentAnnual, v => {
+    setSetting('pensionCurrentAnnual', Math.max(0, v)).then(() => { queueWrite('settings', 'pensionCurrentAnnual').catch(() => {}); reRender(); });
+  }, { noNegative: true });
+  viewContainer.querySelector('#apc-log').onclick = () => openApcEditor(null, reRender);
+  viewContainer.querySelectorAll('.apc-row').forEach(r => r.onclick = () => {
+    const p = s.purchases.find(x => x.id === Number(r.dataset.id));
+    if (p) openApcEditor(p, reRender);
+  });
+  viewContainer.querySelectorAll('.pen-est-row').forEach(r => r.onclick = () => {
+    openPensionEstimateEditor(Number(r.dataset.idx), s.estimates, reRender);
+  });
+  drawPensionChart(viewContainer.querySelector('#pen-chart'), s.currentAnnual, s.estimates);
+}
+
+async function openApcEditor(existing, onSaved) {
+  let oDate = existing?.date ?? today();
+  let cost = existing?.cost ?? 0;
+  let pensionBought = existing?.pensionBought ?? 0;
+  let contract = existing?.contract ?? '';
+  let note = existing?.note ?? '';
+  let endDate = existing?.endDate ?? null;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit' : 'Log'} APC purchase</span>
+        <button class="sheet-close" id="ap-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group" style="cursor:pointer" id="ap-date-row">
+          <label class="form-label">Purchase / start date</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ap-date-disp">${fmtDate(oDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="ap-pension-row">
+          <label class="form-label">Extra yearly pension bought</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ap-pension-disp" style="font-size:16px;font-weight:600">${pensionBought > 0 ? fmt(pensionBought) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="ap-cost-row">
+          <label class="form-label">Cost</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ap-cost-disp" style="font-size:16px;font-weight:600">${cost > 0 ? fmt(cost) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Contract length / status</label>
+          <input class="form-input" type="text" id="ap-contract" value="${contract}" placeholder="e.g. 1 year, Single, Due to finish 30/09/28" maxlength="120">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="ap-end-row">
+          <label class="form-label">End date (optional)</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ap-end-disp">${endDate ? fmtDate(endDate) : 'None (ongoing / single)'}</span>
+            <span style="display:flex;gap:8px;align-items:center">${endDate ? `<span id="ap-end-clear" style="color:#f44336;font-size:13px">clear</span>` : ''}<span style="color:var(--text-2)">›</span></span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="ap-note" value="${note}" placeholder="e.g. rate rose partway through" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="ap-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="ap-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#ap-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ap-date-row').onclick = () => openDatePicker(oDate, today(), d => { oDate = d; overlay.querySelector('#ap-date-disp').textContent = fmtDate(d); });
+  overlay.querySelector('#ap-pension-row').onclick = () => openAmountPad('Extra yearly pension bought', pensionBought, v => { pensionBought = Math.max(0, v); overlay.querySelector('#ap-pension-disp').textContent = pensionBought > 0 ? fmt(pensionBought) : 'Tap to enter'; }, { noNegative: true });
+  overlay.querySelector('#ap-cost-row').onclick = () => openAmountPad('Cost', cost, v => { cost = Math.max(0, v); overlay.querySelector('#ap-cost-disp').textContent = cost > 0 ? fmt(cost) : 'Tap to enter'; }, { noNegative: true });
+  overlay.querySelector('#ap-contract').oninput = e => { contract = e.target.value; };
+  overlay.querySelector('#ap-note').oninput = e => { note = e.target.value; };
+  const bindEndClear = () => {
+    const c = overlay.querySelector('#ap-end-clear');
+    if (c) c.onclick = ev => { ev.stopPropagation(); endDate = null; refreshEnd(); };
+  };
+  const refreshEnd = () => {
+    overlay.querySelector('#ap-end-disp').textContent = endDate ? fmtDate(endDate) : 'None (ongoing / single)';
+    const wrap = overlay.querySelector('#ap-end-row .form-input > span:last-child');
+    wrap.innerHTML = `${endDate ? `<span id="ap-end-clear" style="color:#f44336;font-size:13px">clear</span>` : ''}<span style="color:var(--text-2)">›</span>`;
+    bindEndClear();
+  };
+  overlay.querySelector('#ap-end-row').onclick = () => openDatePicker(endDate ?? today(), '2099-12-31', d => { endDate = d; refreshEnd(); });
+  bindEndClear();
+
+  overlay.querySelector('#ap-save').onclick = async () => {
+    if ((pensionBought || 0) <= 0) { showToast('Enter the pension bought'); return; }
+    const rec = { date: oDate, cost: cost || 0, pensionBought: pensionBought || 0, contract: contract.trim(), note: note.trim(), endDate: endDate || null };
+    if (existing) {
+      await db.apcPurchases.update(existing.id, rec);
+      queueWrite('apcPurchases', existing.id).catch(() => {});
+    } else {
+      const id = await db.apcPurchases.add(rec);
+      queueWrite('apcPurchases', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'APC updated' : 'APC logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#ap-del')?.addEventListener('click', async () => {
+    await db.apcPurchases.delete(existing.id);
+    queueDelete('apcPurchases', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('APC deleted');
+    onSaved?.();
+  });
+}
+
+// Edit one retirement-age estimate (from the annual statement). Persists the
+// whole estimates array back as a JSON setting.
+async function openPensionEstimateEditor(idx, estimates, onSaved) {
+  const est = { ...estimates[idx] };
+  let pension = Number(est.pension) || 0;
+  let maxLumpSum = Number(est.maxLumpSum) || 0;
+  let maxLumpPension = Number(est.maxLumpPension) || 0;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${est.label}${est.year ? ` (${est.year})` : ''}</span>
+        <button class="sheet-close" id="pe-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Label</label>
+          <input class="form-input" type="text" id="pe-label" value="${est.label ?? ''}" maxlength="40">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-input" type="number" id="pe-year" value="${est.year ?? ''}" placeholder="e.g. 2045">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="pe-pension-row">
+          <label class="form-label">Standard yearly pension</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="pe-pension-disp" style="font-size:16px;font-weight:600">${fmt(pension)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="pe-lumpsum-row">
+          <label class="form-label">Max one-off lump sum</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="pe-lumpsum-disp" style="font-size:16px;font-weight:600">${fmt(maxLumpSum)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="pe-lumppension-row">
+          <label class="form-label">Reduced yearly pension (with max lump)</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="pe-lumppension-disp" style="font-size:16px;font-weight:600">${fmt(maxLumpPension)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-full" id="pe-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#pe-close').onclick = () => overlay.remove();
+  overlay.querySelector('#pe-pension-row').onclick = () => openAmountPad('Standard yearly pension', pension, v => { pension = Math.max(0, v); overlay.querySelector('#pe-pension-disp').textContent = fmt(pension); }, { noNegative: true });
+  overlay.querySelector('#pe-lumpsum-row').onclick = () => openAmountPad('Max one-off lump sum', maxLumpSum, v => { maxLumpSum = Math.max(0, v); overlay.querySelector('#pe-lumpsum-disp').textContent = fmt(maxLumpSum); }, { noNegative: true });
+  overlay.querySelector('#pe-lumppension-row').onclick = () => openAmountPad('Reduced yearly pension (with max lump)', maxLumpPension, v => { maxLumpPension = Math.max(0, v); overlay.querySelector('#pe-lumppension-disp').textContent = fmt(maxLumpPension); }, { noNegative: true });
+
+  overlay.querySelector('#pe-save').onclick = async () => {
+    const next = estimates.map(e => ({ ...e }));
+    next[idx] = {
+      label: overlay.querySelector('#pe-label').value.trim() || est.label,
+      year: Number(overlay.querySelector('#pe-year').value) || est.year,
+      pension, maxLumpSum, maxLumpPension,
+    };
+    await setSetting('pensionEstimates', JSON.stringify(next));
+    queueWrite('settings', 'pensionEstimates').catch(() => {});
+    overlay.remove();
+    showToast('Estimate updated');
+    onSaved?.();
+  };
 }
 
 async function openAccountRatesEditor() {
@@ -4776,7 +5167,7 @@ async function renderBankGilulu(activeHoldingId = null) {
   viewContainer.innerHTML = `
     <div class="settings-screen" id="bg-screen">
       <div class="screen-header">
-        <button class="icon-btn" onclick="window.app.navigate('settings')">
+        <button class="icon-btn" onclick="window.app.goBack()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <span class="screen-title">Bank of Gilulu</span>
@@ -5222,6 +5613,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-help-to-buy"><span class="settings-row-icon">🔑</span><span class="settings-row-label">Help to Buy</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-investments"><span class="settings-row-icon">📈</span><span class="settings-row-label">Investments</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-charity"><span class="settings-row-icon">💝</span><span class="settings-row-label">Charity donations</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-pension"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Pension maximising</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -5234,7 +5626,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 10:00 BST (v50)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 11:30 BST (v51)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -5248,6 +5640,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
   viewContainer.querySelector('#nav-investments').onclick = () => navigate('investments');
   viewContainer.querySelector('#nav-charity').onclick = () => navigate('charity');
+  viewContainer.querySelector('#nav-pension').onclick = () => navigate('pension');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
@@ -5377,7 +5770,7 @@ function renderImport() {
   viewContainer.innerHTML = `
     <div class="import-screen">
       <div class="screen-header" style="padding-top:52px">
-        <button class="icon-btn" onclick="window.app.navigate('settings')"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="screen-title">Import Data</span>
         <div style="width:34px"></div>
       </div>
@@ -5624,5 +6017,37 @@ async function init() {
   navigate('balance');
 }
 
-window.app = { navigate };
+window.app = { navigate, goBack };
 init().catch(console.error);
+
+// Swipe-right-from-the-left-edge acts as "back" on any page that has a top-left
+// back button. Mirrors the native iOS/Android back gesture. We only trigger on
+// a swipe that starts near the left edge, travels mostly horizontally, and ends
+// well to the right — so it never fights vertical scrolling or in-page swipes
+// (e.g. swipe-to-delete rows, which start away from the edge).
+(function enableSwipeBack() {
+  const EDGE = 32;      // px from the left edge the gesture must start within
+  const MIN_X = 70;     // px of rightward travel required
+  const MAX_Y = 60;     // max vertical drift allowed
+  // Views that show a back button and should respond to the gesture.
+  const BACKABLE = new Set([
+    'breakdown', 'recurring', 'extraIncomes', 'distributions', 'netWealth',
+    'mortgageFree', 'helpToBuy', 'investments', 'charity', 'pension',
+    'bankGilulu', 'householdBills', 'accounts', 'yearlyTrends', 'import',
+  ]);
+  let startX = 0, startY = 0, tracking = false;
+  viewContainer.addEventListener('touchstart', e => {
+    // Ignore if a sheet/overlay is open (those have their own dismissal).
+    if (document.querySelector('.sheet-overlay')) { tracking = false; return; }
+    const t = e.touches[0];
+    tracking = t.clientX <= EDGE && BACKABLE.has(state.view);
+    startX = t.clientX; startY = t.clientY;
+  }, { passive: true });
+  viewContainer.addEventListener('touchend', e => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX, dy = Math.abs(t.clientY - startY);
+    if (dx >= MIN_X && dy <= MAX_Y) goBack();
+  }, { passive: true });
+})();

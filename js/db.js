@@ -49,6 +49,12 @@ db.version(5).stores({
   charityDonations: '++id, charity, startDate',
 });
 
+// Financial goals: pension maximising. Each row is an APC (Additional Pension
+// Contribution) purchase — extra annual pension bought into the LGPS pension.
+db.version(6).stores({
+  apcPurchases: '++id, date',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
