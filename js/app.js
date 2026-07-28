@@ -877,14 +877,13 @@ async function renderBreakdown() {
 
   const cycleLen = diffDays(cycle.start, cycle.end) + 1;
 
-  const rows = [
-    { icon: '💰', bg: '#e8f5e9', label: 'Income', amount: bd.totalIncome, daily: bd.regularIncome / cycleLen, amountClass: 'text-green',
-      subs: [{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Extra income', amount: bd.variableIncome }] },
-    { icon: '🛒', bg: '#ffebee', label: 'Expenses', amount: bd.totalExpenses, daily: bd.recurringExpenses / cycleLen, amountClass: 'text-red',
-      subs: [{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }] },
-    { icon: '💛', bg: '#fffde7', label: 'Savings', amount: bd.savings, daily: bd.savings / cycleLen, amountClass: '', subs: [] },
-    { icon: '📊', bg: '#e3f2fd', label: 'Budget left', amount: bd.budgetLeft, daily: null, amountClass: bd.budgetLeft >= 0 ? 'text-green' : 'text-red', subs: [] },
-  ];
+  const subNav = {
+    'Regular income':    () => navigate('recurring', { recurringTab: 'income' }),
+    'Extra income':      () => navigate('extraIncomes'),
+    'Recurring expenses':() => navigate('recurring', { recurringTab: 'expenses' }),
+    'Variable expenses': () => navigate('transactions'),
+    'Big Expenses':      () => navigate('distributions'),
+  };
 
   viewContainer.innerHTML = `
     <div class="breakdown-screen">
@@ -904,32 +903,59 @@ async function renderBreakdown() {
         Daily allowance: <strong>${fmt(bd.dailyAllowance)}/day</strong>
       </div>
       <div class="breakdown-card">
-        ${rows.map(row => `
-          <div>
-            <div class="breakdown-row">
-              <div class="breakdown-row-icon" style="background:${row.bg}">${row.icon}</div>
-              <div class="breakdown-row-info"><div class="breakdown-row-label">${row.label}</div></div>
-              <div class="breakdown-row-amount ${row.amountClass}">
-                ${fmt(Math.abs(row.amount))}
-                ${row.daily != null ? `<div style="font-size:11px;font-weight:400;color:var(--text-2)">${fmt(Math.abs(row.daily))}/day</div>` : ''}
+        <div>
+          <div class="breakdown-row" id="bdr-income" style="cursor:default">
+            <div class="breakdown-row-icon" style="background:#e8f5e9">💰</div>
+            <div class="breakdown-row-info"><div class="breakdown-row-label">Income</div></div>
+            <div class="breakdown-row-amount text-green">
+              ${fmt(Math.abs(bd.totalIncome))}
+              <div style="font-size:11px;font-weight:400;color:var(--text-2)">${fmt(Math.abs(bd.regularIncome / cycleLen))}/day</div>
+            </div>
+          </div>
+          ${[{ label: 'Regular income', amount: bd.regularIncome }, { label: 'Extra income', amount: bd.variableIncome }].filter(s => s.amount !== 0).map(s => `
+            <div class="breakdown-sub-rows">
+              <div class="breakdown-sub-row" data-nav="${s.label}" style="cursor:pointer">
+                <span class="breakdown-sub-label">${s.label}</span>
+                <span class="breakdown-sub-amount" style="display:flex;align-items:center;gap:6px">${fmt(Math.abs(s.amount))}<span style="color:var(--text-2);font-size:14px">›</span></span>
               </div>
             </div>
-            ${row.subs.filter(s => s.amount !== 0).map(s => `
-              <div class="breakdown-sub-rows">
-                <div class="breakdown-sub-row">
-                  <span class="breakdown-sub-label">${s.label}</span>
-                  <span class="breakdown-sub-amount">
-                    ${fmt(Math.abs(s.amount))}
-                    ${s.daily != null ? `<span style="font-size:10px;color:var(--text-2);margin-left:4px">${fmt(Math.abs(s.daily))}/d</span>` : ''}
-                  </span>
-                </div>
-              </div>
-            `).join('')}
+          `).join('')}
+        </div>
+        <div>
+          <div class="breakdown-row" style="cursor:default">
+            <div class="breakdown-row-icon" style="background:#ffebee">🛒</div>
+            <div class="breakdown-row-info"><div class="breakdown-row-label">Expenses</div></div>
+            <div class="breakdown-row-amount text-red">
+              ${fmt(Math.abs(bd.totalExpenses))}
+              <div style="font-size:11px;font-weight:400;color:var(--text-2)">${fmt(Math.abs(bd.recurringExpenses / cycleLen))}/day</div>
+            </div>
           </div>
-        `).join('')}
-      </div>
-      <div style="padding:0 12px 16px">
-        <button class="btn btn-primary btn-full" onclick="window.app.navigate('recurring')">View recurring expenses</button>
+          ${[{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }].filter(s => s.amount !== 0).map(s => `
+            <div class="breakdown-sub-rows">
+              <div class="breakdown-sub-row" data-nav="${s.label}" style="cursor:pointer">
+                <span class="breakdown-sub-label">${s.label}</span>
+                <span class="breakdown-sub-amount" style="display:flex;align-items:center;gap:6px">${fmt(Math.abs(s.amount))}<span style="color:var(--text-2);font-size:14px">›</span></span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div>
+          <div class="breakdown-row" id="bdr-savings" style="cursor:pointer">
+            <div class="breakdown-row-icon" style="background:#fffde7">💛</div>
+            <div class="breakdown-row-info"><div class="breakdown-row-label">Savings</div></div>
+            <div class="breakdown-row-amount" style="display:flex;align-items:center;gap:6px">
+              ${fmt(Math.abs(bd.savings))}
+              <span style="color:var(--text-2);font-size:14px">›</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="breakdown-row" style="cursor:default">
+            <div class="breakdown-row-icon" style="background:#e3f2fd">📊</div>
+            <div class="breakdown-row-info"><div class="breakdown-row-label">Budget left</div></div>
+            <div class="breakdown-row-amount ${bd.budgetLeft >= 0 ? 'text-green' : 'text-red'}">${fmt(Math.abs(bd.budgetLeft))}</div>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -946,6 +972,10 @@ async function renderBreakdown() {
     state.viewingCycle = cycleForDate(nextStr);
     renderBreakdown();
   };
+  viewContainer.querySelectorAll('[data-nav]').forEach(el => {
+    el.onclick = () => { const fn = subNav[el.dataset.nav]; if (fn) fn(); };
+  });
+  viewContainer.querySelector('#bdr-savings').onclick = () => openSavingsSheet();
 }
 
 async function renderRecurring() {
@@ -3554,9 +3584,11 @@ async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
         <button class="sheet-close" id="mo-close">✕</button>
       </div>
       <div class="sheet-body" style="padding:16px">
-        <div class="form-group">
+        <div class="form-group" style="cursor:pointer" id="mo-date-row">
           <label class="form-label">Date</label>
-          <input class="form-input" type="date" id="mo-date" value="${oDate}" max="${today()}">
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="mo-date-disp">${fmtDate(oDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
         </div>
         <div class="form-group" style="cursor:pointer" id="mo-my-row">
           <label class="form-label">Your contribution</label>
@@ -3585,7 +3617,7 @@ async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
 
   const updTotal = () => { overlay.querySelector('#mo-total').textContent = fmt((myAmount || 0) + (richAmount || 0)); };
   overlay.querySelector('#mo-close').onclick = () => overlay.remove();
-  overlay.querySelector('#mo-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#mo-date-row').onclick = () => openDatePicker(oDate, today(), d => { oDate = d; overlay.querySelector('#mo-date-disp').textContent = fmtDate(d); });
   overlay.querySelector('#mo-note').oninput = e => { note = e.target.value; };
   overlay.querySelector('#mo-my-row').onclick = () => openAmountPad('Your contribution', myAmount, v => { myAmount = Math.max(0, v); overlay.querySelector('#mo-my-disp').textContent = fmt(myAmount); updTotal(); }, { noNegative: true });
   overlay.querySelector('#mo-rich-row').onclick = () => openAmountPad("Rich's contribution", richAmount, v => { richAmount = Math.max(0, v); overlay.querySelector('#mo-rich-disp').textContent = fmt(richAmount); updTotal(); }, { noNegative: true });
@@ -3706,9 +3738,13 @@ async function computeHelpToBuyProjection() {
 function drawHelpToBuyChart(canvas, series) {
   if (!canvas || typeof Chart === 'undefined' || series.length < 2) return;
   const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const labels = series.map(pt => {
+  const n = series.length;
+  // Pick a sensible label step: every month up to 12, quarterly up to 36, half-yearly up to 72, yearly beyond
+  const step = n <= 12 ? 1 : n <= 36 ? 3 : n <= 72 ? 6 : 12;
+  const labels = series.map((pt, i) => {
     const [yy, mm] = pt.month.split('-');
-    return (mm === '01' || pt === series[0]) ? `${MON[+mm]} ${yy.slice(2)}` : '';
+    if (i === 0 || i === n - 1 || +mm % step === 1 % step) return `${MON[+mm]} ${yy.slice(2)}`;
+    return '';
   });
   if (canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas.getContext('2d'), {
@@ -3840,9 +3876,11 @@ async function openHelpToBuyPaymentEditor(existing, onSaved, proj) {
         <button class="sheet-close" id="hb-close">✕</button>
       </div>
       <div class="sheet-body" style="padding:16px">
-        <div class="form-group">
+        <div class="form-group" style="cursor:pointer" id="hb-date-row">
           <label class="form-label">Date</label>
-          <input class="form-input" type="date" id="hb-date" value="${oDate}" max="${today()}">
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="hb-date-disp">${fmtDate(oDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
         </div>
         <div class="form-group" style="cursor:pointer" id="hb-amount-row">
           <label class="form-label">Amount paid</label>
@@ -3869,7 +3907,7 @@ async function openHelpToBuyPaymentEditor(existing, onSaved, proj) {
     </div>`;
 
   overlay.querySelector('#hb-close').onclick = () => overlay.remove();
-  overlay.querySelector('#hb-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#hb-date-row').onclick = () => openDatePicker(oDate, today(), d => { oDate = d; overlay.querySelector('#hb-date-disp').textContent = fmtDate(d); });
   overlay.querySelector('#hb-note').oninput = e => { note = e.target.value; };
   overlay.querySelector('#hb-amount-row').onclick = () => openAmountPad('Amount paid', amount, v => { amount = Math.max(0, v); overlay.querySelector('#hb-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
   overlay.querySelector('#hb-pct-row').onclick = () => openAmountPad('% of property bought back', percentBought, v => { percentBought = Math.max(0, v); overlay.querySelector('#hb-pct-disp').textContent = percentBought + '%'; }, { prefix: '', suffix: '%', noNegative: true, decimals: 1 });
@@ -4116,9 +4154,11 @@ async function openInvestmentContributionEditor(existing, onSaved, summary) {
           <label class="form-label">Into account</label>
           <select class="form-input" id="ic-acc">${opts}</select>
         </div>
-        <div class="form-group">
+        <div class="form-group" style="cursor:pointer" id="ic-date-row">
           <label class="form-label">Date</label>
-          <input class="form-input" type="date" id="ic-date" value="${oDate}" max="${today()}">
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ic-date-disp">${fmtDate(oDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
         </div>
         <div class="form-group" style="cursor:pointer" id="ic-amount-row">
           <label class="form-label">Amount</label>
@@ -4141,7 +4181,7 @@ async function openInvestmentContributionEditor(existing, onSaved, summary) {
   overlay.querySelector('#ic-close').onclick = () => overlay.remove();
   overlay.querySelector('#ic-acc').value = accountId;
   overlay.querySelector('#ic-acc').onchange = e => { accountId = Number(e.target.value); };
-  overlay.querySelector('#ic-date').onchange = e => { oDate = e.target.value; };
+  overlay.querySelector('#ic-date-row').onclick = () => openDatePicker(oDate, today(), d => { oDate = d; overlay.querySelector('#ic-date-disp').textContent = fmtDate(d); });
   overlay.querySelector('#ic-note').oninput = e => { note = e.target.value; };
   overlay.querySelector('#ic-amount-row').onclick = () => openAmountPad('Contribution amount', amount, v => { amount = Math.max(0, v); overlay.querySelector('#ic-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
 
@@ -4339,17 +4379,23 @@ async function openCharityEditor(existing, onSaved) {
             <span id="ch-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
           </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" style="cursor:pointer" id="ch-start-row">
           <label class="form-label">Start date</label>
-          <input class="form-input" type="date" id="ch-start" value="${startDate}" max="${today()}">
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="ch-start-disp">${fmtDate(startDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
         </div>
         <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0">
           <label style="font-size:14px;font-weight:500">Still giving (ongoing)</label>
           <input type="checkbox" id="ch-ongoing" ${ongoing ? 'checked' : ''} style="width:18px;height:18px">
         </div>
         <div class="form-group" id="ch-end-group" style="display:${ongoing ? 'none' : 'block'}">
-          <label class="form-label">End date</label>
-          <input class="form-input" type="date" id="ch-end" value="${endDate ?? today()}" max="${today()}">
+          <div class="form-group" style="cursor:pointer;margin-bottom:0" id="ch-end-row">
+            <label class="form-label">End date</label>
+            <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+              <span id="ch-end-disp">${fmtDate(endDate ?? today())}</span><span style="color:var(--text-2)">›</span>
+            </div>
+          </div>
         </div>
         <div class="form-group">
           <label class="form-label">Note (optional)</label>
@@ -4362,9 +4408,9 @@ async function openCharityEditor(existing, onSaved) {
 
   overlay.querySelector('#ch-close').onclick = () => overlay.remove();
   overlay.querySelector('#ch-name').oninput = e => { charity = e.target.value; };
-  overlay.querySelector('#ch-start').onchange = e => { startDate = e.target.value; };
+  overlay.querySelector('#ch-start-row').onclick = () => openDatePicker(startDate, today(), d => { startDate = d; overlay.querySelector('#ch-start-disp').textContent = fmtDate(d); });
   overlay.querySelector('#ch-note').oninput = e => { note = e.target.value; };
-  overlay.querySelector('#ch-end').onchange = e => { endDate = e.target.value; };
+  overlay.querySelector('#ch-end-row').onclick = () => openDatePicker(endDate ?? today(), today(), d => { endDate = d; overlay.querySelector('#ch-end-disp').textContent = fmtDate(d); });
   overlay.querySelector('#ch-ongoing').onchange = e => {
     ongoing = e.target.checked;
     overlay.querySelector('#ch-end-group').style.display = ongoing ? 'none' : 'block';
@@ -4376,7 +4422,7 @@ async function openCharityEditor(existing, onSaved) {
     if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
     const rec = {
       charity: charity.trim(), amount: amount || 0, startDate,
-      endDate: ongoing ? null : (overlay.querySelector('#ch-end').value || null),
+      endDate: ongoing ? null : (endDate || null),
       note: note.trim(),
     };
     if (existing) {
@@ -5188,7 +5234,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 01:45 BST (v49)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 10:00 BST (v50)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
