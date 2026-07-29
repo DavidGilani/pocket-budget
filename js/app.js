@@ -195,6 +195,24 @@ async function regenerateAllDistributionChildren() {
   }
 }
 
+// Non-destructive self-heal: make sure every distribution still has its daily
+// child transactions. regenerateAllDistributionChildren() only runs as a signed-
+// in post-pull step, so if a sync tombstone or an interrupted rebuild wiped a
+// big expense's children, it would silently stop counting against the budget.
+// This runs on every app open (online or offline) and only recreates what's
+// missing, so nothing is disturbed when everything is already intact.
+async function ensureDistributionChildren() {
+  const dists = await db.distributions.toArray();
+  for (const dist of dists) {
+    if (!dist.id || !dist.startDate || !dist.endDate) continue;
+    const count = await db.transactions.where('distributionId').equals(dist.id).count();
+    if (count === 0) {
+      const children = generateDistributionChildren(dist);
+      if (children.length) await db.transactions.bulkAdd(children);
+    }
+  }
+}
+
 async function renderBalance() {
   const [projections, cycle] = await Promise.all([
     calcProjectedBalances(3),
@@ -1849,12 +1867,16 @@ async function renderYearlyTrends() {
 
 function makeDistCard(d, catMap) {
   const cat = catMap[d.categoryId];
+  // "Finished" is derived from the date, not the stored isFinished flag — that
+  // flag is only set at save time, so a distribution that ran out naturally
+  // would otherwise keep showing a full progress bar forever.
+  const finished = d.endDate < today();
   const progress = Math.min(100, Math.max(0, diffDays(d.startDate, today()) / Math.max(1, diffDays(d.startDate, d.endDate)) * 100));
   return `
     <div class="dist-card" data-dist-id="${d.id}">
       <div class="dist-card-header"><span class="dist-card-name">${d.description}</span><span class="dist-card-amount">${fmt(Math.abs(d.totalAmount))}</span></div>
       <div class="dist-card-meta">${cat?.icon ?? ''} ${cat?.name ?? ''} &bull; ${fmtDate(d.startDate)} - ${fmtDate(d.endDate)}</div>
-      ${!d.isFinished ? `<div class="dist-progress-wrap"><div class="dist-progress-fill" style="width:${progress}%"></div></div>` : ''}
+      ${!finished ? `<div class="dist-progress-wrap"><div class="dist-progress-fill" style="width:${progress}%"></div></div>` : ''}
     </div>
   `;
 }
@@ -1948,10 +1970,12 @@ async function openDistEditor(id, isIncomeType = false) {
   if (dist) {
     overlay.querySelector('#dist-del').onclick = async () => {
       if (!confirm('Delete this and all its daily entries?')) return;
-      const childIds = await db.transactions.where('distributionId').equals(id).primaryKeys();
+      // Child transactions are regenerated locally and are NEVER uploaded to
+      // Firestore, so we must not write delete tombstones for them: their ids
+      // collide with real transaction ids on other devices, and pulling such a
+      // tombstone would delete a real transaction. Just remove them locally.
       await db.transactions.where('distributionId').equals(id).delete();
       await db.distributions.delete(id);
-      await Promise.all(childIds.map(cid => queueDelete('transactions', cid)));
       await queueDelete('distributions', id);
       overlay.remove(); goBack(); showToast('Deleted');
     };
@@ -1965,9 +1989,10 @@ async function openDistEditor(id, isIncomeType = false) {
     if (!description || isNaN(totalAmount) || !startDate || !endDate) { showToast('Fill in all fields'); return; }
     if (endDate < startDate) { showToast('End date must be after start date'); return; }
     if (id) {
-      const oldChildIds = await db.transactions.where('distributionId').equals(id).primaryKeys();
+      // Drop the old daily children locally only — they're never synced, so no
+      // Firestore delete tombstones (those would collide with real transaction
+      // ids on other devices and delete real data).
       await db.transactions.where('distributionId').equals(id).delete();
-      await Promise.all(oldChildIds.map(cid => queueDelete('transactions', cid)));
     }
     const distData = { description, totalAmount, categoryId, startDate, endDate, isIncome: isIncomeDist, isFinished: endDate < today() };
     let distId;
@@ -1976,8 +2001,8 @@ async function openDistEditor(id, isIncomeType = false) {
     await queueWrite('distributions', distId);
     const children = generateDistributionChildren({ ...distData, id: distId });
     await db.transactions.bulkAdd(children);
-    const newChildren = await db.transactions.where('distributionId').equals(distId).toArray();
-    await Promise.all(newChildren.map(c => queueWrite('transactions', c.id)));
+    // Children are regenerated locally on every device, so they are intentionally
+    // not queued for upload here.
     overlay.remove(); goBack(); showToast(id ? 'Updated' : `Created ${children.length} daily entries`);
   };
 }
@@ -5626,7 +5651,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 11:30 BST (v51)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 12:30 BST (v52)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -6005,6 +6030,9 @@ async function runDataMigrations() {
 async function init() {
   await initDB();
   await runDataMigrations();
+  // Restore any missing big-expense daily entries before the first render, so
+  // the balance is correct even offline / before sync runs.
+  await ensureDistributionChildren();
   await handleRedirectResult();
   navBtns.forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.view)));
   initSync(user => {
