@@ -75,7 +75,7 @@ const SEED_CATEGORIES = [
   { id:17, name:'Bills',         icon:'📋', colour:'#607D8B', isIncome:false, sortOrder:99, isArchived:true, legacyId:20 },
   { id:18, name:'Personal Care', icon:'💆', colour:'#E91E63', isIncome:false, sortOrder:99, isArchived:true, legacyId:7  },
   { id:19, name:'Drinks',        icon:'☕', colour:'#795548', isIncome:false, sortOrder:99, isArchived:true, legacyId:26 },
-  { id:20, name:'Sale',          icon:'🏷️', colour:'#9E9E9E', isIncome:true,  sortOrder:99, isArchived:true, legacyId:21 },
+  { id:20, name:'Sale',          icon:'🏷️', colour:'#9E9E9E', isIncome:true,  sortOrder:16, isArchived:false, legacyId:21 },
   { id:21, name:'Investment',    icon:'📈', colour:'#43A047', isIncome:true,  sortOrder:99, isArchived:true, legacyId:9  },
   { id:22, name:'General',       icon:'📦', colour:'#9E9E9E', isIncome:false, sortOrder:99, isArchived:true, legacyId:28 },
   { id:23, name:'Fuel',          icon:'⛽', colour:'#FF9800', isIncome:false, sortOrder:99, isArchived:true, legacyId:29 },
@@ -84,6 +84,7 @@ const SEED_CATEGORIES = [
   { id:26, name:'Coffee',        icon:'☕', colour:'#795548', isIncome:false, sortOrder:99, isArchived:true, legacyId:11 },
   { id:27, name:'Bonus',         icon:'⭐', colour:'#FFC107', isIncome:true,  sortOrder:99, isArchived:true, legacyId:30 },
   { id:28, name:'Misc',          icon:'📦', colour:'#9E9E9E', isIncome:false, sortOrder:13, isArchived:false },
+  { id:29, name:'Gift',          icon:'🎁', colour:'#4CAF50', isIncome:true,  sortOrder:17, isArchived:false },
 ];
 
 const SEED_ACCOUNTS = [

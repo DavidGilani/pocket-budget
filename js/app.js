@@ -6005,6 +6005,19 @@ async function runDataMigrations() {
     }
   }
 
+  if (ver < 9) {
+    await setSetting('dataVersion', 9);
+    // Unarchive "Sale" so it's selectable for income logging
+    await db.categories.update(20, { isArchived: false, sortOrder: 16 });
+    queueWrite('categories', 20).catch(() => {});
+    // Add "Gift" income category
+    const existingGift = await db.categories.get(29);
+    if (!existingGift) {
+      await db.categories.add({ id: 29, name: 'Gift', icon: '🎁', colour: '#4CAF50', isIncome: true, sortOrder: 17, isArchived: false });
+      queueWrite('categories', 29).catch(() => {});
+    }
+  }
+
   if (ver < 8) {
     await setSetting('dataVersion', 8);
     // Migrate per-holding ratePeriods to a single global setting

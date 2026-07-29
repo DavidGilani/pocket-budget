@@ -400,7 +400,8 @@ html, body {
   text-align: center;
   color: var(--text-2);
   line-height: 1.2;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto;
 }
 
 .cat-item.selected .cat-name { color: var(--blue); }
