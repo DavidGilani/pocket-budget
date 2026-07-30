@@ -319,13 +319,18 @@ async function renderBalance() {
   if (wealthBannerBtn) wealthBannerBtn.onclick = () => navigate('netWealth');
 }
 
-async function openEntry(type, existingTxn = null) {
+async function openEntry(type, existingTxn = null, existingDist = null, forceDistribute = false) {
+  if (existingDist) type = existingDist.isIncome ? 'income' : 'expense';
   state.entryType = type;
-  state.entryPence = existingTxn ? Math.round(Math.abs(existingTxn.amount) * 100) : 0;
-  state.entryCategory = existingTxn?.categoryId ?? null;
-  state.entryDate = existingTxn?.date ?? today();
-  state.entryNote = existingTxn?.note ?? '';
+  state.entryPence = existingDist ? Math.round(Math.abs(existingDist.totalAmount) * 100)
+                    : existingTxn ? Math.round(Math.abs(existingTxn.amount) * 100) : 0;
+  state.entryCategory = existingDist?.categoryId ?? existingTxn?.categoryId ?? null;
+  state.entryDate = existingDist?.startDate ?? existingTxn?.date ?? today();
+  state.entryEndDate = existingDist?.endDate ?? state.entryDate;
+  state.entryNote = existingDist?.description ?? existingTxn?.note ?? '';
   state.entryEditId = existingTxn?.id ?? null;
+  state.entryDistId = existingDist?.id ?? null;
+  state.entryDistribute = !!existingDist || forceDistribute;
 
   const cats = (await db.categories.toArray())
     .filter(c => !c.isArchived && (!!c.isIncome === (type === 'income')))
@@ -333,6 +338,12 @@ async function openEntry(type, existingTxn = null) {
 
   const selectedCat = cats.find(c => c.id === state.entryCategory);
   const hasCategory = !!selectedCat;
+
+  let titleText;
+  if (existingDist) titleText = `Edit ${type === 'income' ? 'Extra Income' : 'Big Expense'}`;
+  else titleText = `${existingTxn ? 'Edit' : 'Add'} ${type === 'income' ? 'Income' : 'Expense'}`;
+
+  const dOn = state.entryDistribute;
 
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
@@ -343,7 +354,7 @@ async function openEntry(type, existingTxn = null) {
       <div class="sheet-handle"></div>
       <div class="sheet-header">
         <button class="sheet-close" id="entry-close">✕</button>
-        <span class="sheet-title">${existingTxn ? 'Edit' : 'Add'} ${type === 'income' ? 'Income' : 'Expense'}</span>
+        <span class="sheet-title">${titleText}</span>
         <button class="entry-save-btn" id="entry-save">✓</button>
       </div>
       <div class="sheet-body">
@@ -361,18 +372,30 @@ async function openEntry(type, existingTxn = null) {
         </div>
 
         <div class="entry-fields">
+          <div class="entry-field entry-toggle-row" id="distribute-row" style="cursor:pointer">
+            <span class="entry-field-icon">📆</span>
+            <label>Distribute over days</label>
+            <span class="entry-toggle ${dOn ? 'on' : ''}" id="distribute-toggle"></span>
+          </div>
           <div class="entry-field" id="date-field" style="cursor:pointer">
             <span class="entry-field-icon">📅</span>
-            <label>Date</label>
+            <label id="date-label">${dOn ? 'Start date' : 'Date'}</label>
             <span id="entry-date-display" style="flex:1;font-size:15px;color:var(--text);text-align:right">${fmtDate(state.entryDate)}</span>
+            <span style="color:var(--text-2);font-size:18px">›</span>
+          </div>
+          <div class="entry-field" id="enddate-field" style="cursor:pointer;display:${dOn ? '' : 'none'}">
+            <span class="entry-field-icon">🏁</span>
+            <label>End date</label>
+            <span id="entry-enddate-display" style="flex:1;font-size:15px;color:var(--text);text-align:right">${fmtDate(state.entryEndDate)}</span>
             <span style="color:var(--text-2);font-size:18px">›</span>
           </div>
           <div class="entry-field">
             <span class="entry-field-icon">📝</span>
-            <label>Note</label>
-            <input type="text" id="entry-note" placeholder="Optional note" value="${state.entryNote}" maxlength="200" autocomplete="off">
+            <label id="note-label">${dOn ? 'Description' : 'Note'}</label>
+            <input type="text" id="entry-note" placeholder="${dOn ? 'e.g. Holiday flights' : 'Optional note'}" value="${state.entryNote.replace(/"/g,'&quot;')}" maxlength="200" autocomplete="off">
           </div>
           <div id="note-suggestions" class="note-suggestions"></div>
+          ${existingDist ? `<button class="btn btn-danger" id="entry-delete" style="margin-top:4px">Delete</button>` : ''}
         </div>
       </div>
 
@@ -398,6 +421,20 @@ async function openEntry(type, existingTxn = null) {
     });
   };
 
+  overlay.querySelector('#distribute-row').onclick = () => {
+    state.entryDistribute = !state.entryDistribute;
+    const on = state.entryDistribute;
+    overlay.querySelector('#distribute-toggle').classList.toggle('on', on);
+    overlay.querySelector('#date-label').textContent = on ? 'Start date' : 'Date';
+    overlay.querySelector('#note-label').textContent = on ? 'Description' : 'Note';
+    overlay.querySelector('#entry-note').placeholder = on ? 'e.g. Holiday flights' : 'Optional note';
+    overlay.querySelector('#enddate-field').style.display = on ? '' : 'none';
+    if (on && state.entryEndDate < state.entryDate) {
+      state.entryEndDate = state.entryDate;
+      overlay.querySelector('#entry-enddate-display').textContent = fmtDate(state.entryEndDate);
+    }
+  };
+
   delegate(overlay, 'click', '.numpad-key:not(.action)', (e, el) => {
     const key = el.dataset.key;
     if (key === '⌫') {
@@ -414,13 +451,30 @@ async function openEntry(type, existingTxn = null) {
   });
 
   overlay.querySelector('#date-field').onclick = () => {
-    openDatePicker(state.entryDate, today(), date => {
+    const maxD = state.entryDistribute ? '4001-01-01' : today();
+    openDatePicker(state.entryDate, maxD, date => {
       state.entryDate = date;
       overlay.querySelector('#entry-date-display').textContent = fmtDate(date);
     });
   };
+  overlay.querySelector('#enddate-field').onclick = () => {
+    openDatePicker(state.entryEndDate, '4001-01-01', date => {
+      state.entryEndDate = date;
+      overlay.querySelector('#entry-enddate-display').textContent = fmtDate(date);
+    });
+  };
   overlay.querySelector('#entry-note').oninput = e => { state.entryNote = e.target.value; };
   overlay.querySelector('#entry-save').onclick = () => saveEntry(overlay);
+  overlay.querySelector('#entry-delete')?.addEventListener('click', async () => {
+    if (!confirm('Delete this and all its daily entries?')) return;
+    // Child transactions are regenerated locally and never uploaded — deleting
+    // them locally only (no Firestore tombstones, which would collide with real
+    // transaction ids on other devices).
+    await db.transactions.where('distributionId').equals(state.entryDistId).delete();
+    await db.distributions.delete(state.entryDistId);
+    await queueDelete('distributions', state.entryDistId);
+    closeEntry(); await refreshAfterEntry(); showToast('Deleted');
+  });
 
   if (state.entryCategory) setupNoteAutocomplete(overlay);
 }
@@ -614,32 +668,78 @@ function closeEntry() {
   if (overlay) overlay.remove();
 }
 
+async function refreshAfterEntry() {
+  if (state.view === 'balance') await renderBalance();
+  else if (state.view === 'transactions') await renderTransactions();
+  else if (state.view === 'distributions') await renderDistributions();
+  else if (state.view === 'extraIncomes') await renderExtraIncomes();
+}
+
 async function saveEntry(overlay) {
   const amount = state.entryPence / 100;
   if (!amount || amount <= 0) { showToast('Enter an amount'); return; }
-  // Auto-assign Misc category for expenses if none selected
-  if (!state.entryCategory && state.entryType === 'expense') state.entryCategory = 28;
 
-  const finalAmount = state.entryType === 'expense' ? -amount : amount;
-  const txn = {
-    date: state.entryDate, amount: finalAmount, categoryId: state.entryCategory,
-    note: state.entryNote.trim(), type: state.entryType, distributionId: null,
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), syncStatus: 'pending',
-  };
-
-  if (state.entryEditId) {
-    await db.transactions.update(state.entryEditId, { ...txn, updatedAt: new Date().toISOString() });
-    queueWrite('transactions', state.entryEditId).catch(() => {});
-    showToast('Transaction updated');
+  if (state.entryDistribute) {
+    // Save as a distribution (big expense / extra income) spread across a range
+    const description = (state.entryNote || '').trim();
+    if (!description) { showToast('Add a description'); return; }
+    if (!state.entryEndDate || state.entryEndDate < state.entryDate) {
+      showToast('End date must be after start date'); return;
+    }
+    const isIncome = state.entryType === 'income';
+    let categoryId = state.entryCategory;
+    if (!categoryId && !isIncome) categoryId = 28; // Misc
+    const distData = {
+      description, totalAmount: amount, categoryId,
+      startDate: state.entryDate, endDate: state.entryEndDate,
+      isIncome, isFinished: state.entryEndDate < today(),
+    };
+    // Drop old daily children locally only — they're never synced, so writing
+    // Firestore delete tombstones would collide with real transaction ids.
+    if (state.entryDistId) {
+      await db.transactions.where('distributionId').equals(state.entryDistId).delete();
+    }
+    // Converting a plain transaction into a distribution — remove the original.
+    if (state.entryEditId) {
+      await db.transactions.delete(state.entryEditId);
+      queueDelete('transactions', state.entryEditId).catch(() => {});
+    }
+    let distId;
+    if (state.entryDistId) { await db.distributions.update(state.entryDistId, distData); distId = state.entryDistId; }
+    else { distId = await db.distributions.add(distData); }
+    await queueWrite('distributions', distId);
+    const children = generateDistributionChildren({ ...distData, id: distId });
+    await db.transactions.bulkAdd(children);
+    // Children are regenerated locally on every device — not queued for upload.
+    showToast(state.entryDistId ? 'Updated' : `Created ${children.length} daily entries`);
   } else {
-    const newId = await db.transactions.add(txn);
-    queueWrite('transactions', newId).catch(() => {});
-    showToast('Saved');
+    // Save as a single transaction
+    if (!state.entryCategory && state.entryType === 'expense') state.entryCategory = 28;
+    // Converting a distribution back into a single transaction — remove it.
+    if (state.entryDistId) {
+      await db.transactions.where('distributionId').equals(state.entryDistId).delete();
+      await db.distributions.delete(state.entryDistId);
+      await queueDelete('distributions', state.entryDistId);
+    }
+    const finalAmount = state.entryType === 'expense' ? -amount : amount;
+    const txn = {
+      date: state.entryDate, amount: finalAmount, categoryId: state.entryCategory,
+      note: (state.entryNote || '').trim(), type: state.entryType, distributionId: null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), syncStatus: 'pending',
+    };
+    if (state.entryEditId) {
+      await db.transactions.update(state.entryEditId, { ...txn, updatedAt: new Date().toISOString() });
+      queueWrite('transactions', state.entryEditId).catch(() => {});
+      showToast('Transaction updated');
+    } else {
+      const newId = await db.transactions.add(txn);
+      queueWrite('transactions', newId).catch(() => {});
+      showToast('Saved');
+    }
   }
 
   closeEntry();
-  if (state.view === 'balance') await renderBalance();
-  else if (state.view === 'transactions') await renderTransactions();
+  await refreshAfterEntry();
 }
 
 async function renderTransactions() {
@@ -1937,74 +2037,14 @@ async function renderExtraIncomes() {
   delegate(extraScreen, 'click', '.dist-card', (e, el) => openDistEditor(Number(el.dataset.distId), true));
 }
 
+// Big expenses / extra incomes now share the same sheet layout as logging a
+// normal expense / income, just with the "Distribute over days" toggle already
+// flicked on. This is a thin wrapper that routes into that unified editor.
 async function openDistEditor(id, isIncomeType = false) {
   const dist = id ? await db.distributions.get(id) : null;
   const isIncomeDist = dist ? !!dist.isIncome : isIncomeType;
-  const allCats = await db.categories.toArray();
-  const cats = allCats.filter(c => !c.isArchived && (!!c.isIncome === isIncomeDist)).sort((a, b) => a.sortOrder - b.sortOrder);
-  const title = isIncomeDist ? (dist ? 'Edit Extra Income' : 'Add Extra Income') : (dist ? 'Edit Big Expense' : 'Add Big Expense');
-  const goBack = () => isIncomeDist ? renderExtraIncomes() : renderDistributions();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'sheet-overlay';
-  overlay.innerHTML = `
-    <div class="sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-header"><span class="sheet-title">${title}</span><button class="sheet-close" id="dist-close">✕</button></div>
-      <div class="sheet-body" style="padding:16px">
-        <div class="form-group"><label class="form-label">Description</label><input class="form-input" id="dist-desc" type="text" value="${dist?.description ?? ''}" placeholder="${isIncomeDist ? 'e.g. Bonus payment' : 'e.g. Holiday flights'}"></div>
-        <div class="form-group"><label class="form-label">Total amount (£)</label><input class="form-input" id="dist-amount" type="number" step="0.01" min="0" value="${dist ? Math.abs(dist.totalAmount) : ''}"></div>
-        <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="dist-cat">${cats.map(c => `<option value="${c.id}" ${dist?.categoryId === c.id ? 'selected' : ''}>${c.icon} ${c.name}</option>`).join('')}</select></div>
-        <div class="form-group"><label class="form-label">Spread from</label><input class="form-input" id="dist-start" type="date" value="${dist?.startDate ?? today()}"></div>
-        <div class="form-group"><label class="form-label">Spread to</label><input class="form-input" id="dist-end" type="date" value="${dist?.endDate ?? today()}"></div>
-        <div style="display:flex;gap:8px;padding-bottom:20px;margin-top:8px">
-          ${dist ? `<button class="btn btn-danger" id="dist-del">Delete</button>` : ''}
-          <button class="btn btn-primary" id="dist-save" style="flex:1">${dist ? 'Update' : 'Save'}</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-  overlay.querySelector('#dist-close').onclick = () => overlay.remove();
-  if (dist) {
-    overlay.querySelector('#dist-del').onclick = async () => {
-      if (!confirm('Delete this and all its daily entries?')) return;
-      // Child transactions are regenerated locally and are NEVER uploaded to
-      // Firestore, so we must not write delete tombstones for them: their ids
-      // collide with real transaction ids on other devices, and pulling such a
-      // tombstone would delete a real transaction. Just remove them locally.
-      await db.transactions.where('distributionId').equals(id).delete();
-      await db.distributions.delete(id);
-      await queueDelete('distributions', id);
-      overlay.remove(); goBack(); showToast('Deleted');
-    };
-  }
-  overlay.querySelector('#dist-save').onclick = async () => {
-    const description = overlay.querySelector('#dist-desc').value.trim();
-    const totalAmount = parseFloat(overlay.querySelector('#dist-amount').value);
-    const categoryId = Number(overlay.querySelector('#dist-cat').value);
-    const startDate = overlay.querySelector('#dist-start').value;
-    const endDate = overlay.querySelector('#dist-end').value;
-    if (!description || isNaN(totalAmount) || !startDate || !endDate) { showToast('Fill in all fields'); return; }
-    if (endDate < startDate) { showToast('End date must be after start date'); return; }
-    if (id) {
-      // Drop the old daily children locally only — they're never synced, so no
-      // Firestore delete tombstones (those would collide with real transaction
-      // ids on other devices and delete real data).
-      await db.transactions.where('distributionId').equals(id).delete();
-    }
-    const distData = { description, totalAmount, categoryId, startDate, endDate, isIncome: isIncomeDist, isFinished: endDate < today() };
-    let distId;
-    if (id) { await db.distributions.update(id, distData); distId = id; }
-    else { distId = await db.distributions.add(distData); }
-    await queueWrite('distributions', distId);
-    const children = generateDistributionChildren({ ...distData, id: distId });
-    await db.transactions.bulkAdd(children);
-    // Children are regenerated locally on every device, so they are intentionally
-    // not queued for upload here.
-    overlay.remove(); goBack(); showToast(id ? 'Updated' : `Created ${children.length} daily entries`);
-  };
+  const type = isIncomeDist ? 'income' : 'expense';
+  await openEntry(type, null, dist, true);
 }
 
 async function renderAccounts() {
