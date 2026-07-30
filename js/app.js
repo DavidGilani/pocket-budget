@@ -372,11 +372,6 @@ async function openEntry(type, existingTxn = null, existingDist = null, forceDis
         </div>
 
         <div class="entry-fields">
-          <div class="entry-field entry-toggle-row" id="distribute-row" style="cursor:pointer">
-            <span class="entry-field-icon">📆</span>
-            <label>Distribute over days</label>
-            <span class="entry-toggle ${dOn ? 'on' : ''}" id="distribute-toggle"></span>
-          </div>
           <div class="entry-field" id="date-field" style="cursor:pointer">
             <span class="entry-field-icon">📅</span>
             <label id="date-label">${dOn ? 'Start date' : 'Date'}</label>
@@ -395,6 +390,10 @@ async function openEntry(type, existingTxn = null, existingDist = null, forceDis
             <input type="text" id="entry-note" placeholder="${dOn ? 'e.g. Holiday flights' : 'Optional note'}" value="${state.entryNote.replace(/"/g,'&quot;')}" maxlength="200" autocomplete="off">
           </div>
           <div id="note-suggestions" class="note-suggestions"></div>
+          <div class="distribute-mini" id="distribute-row" style="cursor:pointer">
+            <span>Distribute over multiple days</span>
+            <span class="entry-toggle sm ${dOn ? 'on' : ''}" id="distribute-toggle"></span>
+          </div>
           ${existingDist ? `<button class="btn btn-danger" id="entry-delete" style="margin-top:4px">Delete</button>` : ''}
         </div>
       </div>
