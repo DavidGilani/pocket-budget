@@ -5146,17 +5146,24 @@ function bgTotalWithInterest(txs, ratePeriods, toDate) {
   }, 0);
 }
 
-async function renderBankGilulu(activeHoldingId = null) {
+async function renderBankGilulu(activeHoldingId = 'summary') {
   const holdings = await db.friendHoldings.filter(h => h.isActive !== false).toArray();
-
-  let holding = activeHoldingId
-    ? holdings.find(h => h.id === activeHoldingId)
-    : holdings[0];
 
   const ratePeriods = await getGlobalRatePeriods();
   const currentRateEntry = [...ratePeriods].sort((a, b) => b.fromDate.localeCompare(a.fromDate))[0];
   const currentRate = currentRateEntry?.rate ?? null;
   const toDate = today();
+
+  // Summary is the default landing view: it aggregates every account's balance
+  // (with interest) and charts the combined total held in the bank over time.
+  if ((activeHoldingId === 'summary' || activeHoldingId == null) && holdings.length > 0) {
+    await renderBgSummary(holdings, ratePeriods, currentRate, toDate);
+    return;
+  }
+
+  let holding = (activeHoldingId && activeHoldingId !== 'summary')
+    ? holdings.find(h => h.id === activeHoldingId)
+    : holdings[0];
 
   const allTxs = holding
     ? await db.friendTransactions.where('holdingId').equals(holding.id).sortBy('date')
@@ -5189,7 +5196,8 @@ async function renderBankGilulu(activeHoldingId = null) {
   const displayTxs = [...txsWithBalance].reverse(); // newest first
 
   function tabsHTML() {
-    return holdings.map(h => `
+    return `<button class="pill-btn" data-holding-id="summary">📊 Summary</button>` +
+      holdings.map(h => `
       <button class="pill-btn${holding && h.id === holding.id ? ' active' : ''}" data-holding-id="${h.id}">${bgHoldingName(h)}</button>
     `).join('') + `<button class="pill-btn" id="bg-add-account">+ Add</button>`;
   }
@@ -5319,7 +5327,10 @@ async function renderBankGilulu(activeHoldingId = null) {
 
   screen.querySelector('#bg-first-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
   screen.querySelectorAll('[data-holding-id]').forEach(btn => {
-    btn.addEventListener('click', () => renderBankGilulu(Number(btn.dataset.holdingId)));
+    btn.addEventListener('click', () => {
+      const val = btn.dataset.holdingId;
+      renderBankGilulu(val === 'summary' ? 'summary' : Number(val));
+    });
   });
   screen.querySelector('#bg-add-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
   screen.querySelector('#bg-add-tx-btn')?.addEventListener('click', () => {
@@ -5352,6 +5363,158 @@ async function renderBankGilulu(activeHoldingId = null) {
     const niceSteps = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
     const step = niceSteps.find(s => range / s <= 7) ?? 10000;
     new Chart(bgChartCanvas, {
+      type: 'line',
+      data: {
+        labels: chartDates.map(d => new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })),
+        datasets: [{ data: chartValues, borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.08)', fill: true, tension: 0.3, pointRadius: chartDates.length > 20 ? 2 : 4, pointBackgroundColor: '#1a73e8' }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '£' + ctx.parsed.y.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) } } },
+        scales: {
+          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
+          y: { ticks: { font: { size: 10 }, callback: v => bgFmt(v), stepSize: step }, grid: { color: 'rgba(0,0,0,.06)' } },
+        },
+      },
+    });
+  }
+}
+
+async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
+  const allHoldingTxs = await Promise.all(
+    holdings.map(h => db.friendTransactions.where('holdingId').equals(h.id).sortBy('date'))
+  );
+  const feb1 = `${new Date().getFullYear()}-02-01`;
+
+  const perHolding = holdings.map((h, i) => {
+    const txs = allHoldingTxs[i];
+    const total = bgTotalWithInterest(txs, ratePeriods, toDate);
+    const principal = txs.reduce((s, t) => s + t.amount, 0);
+    const thisYearInterest = txs.reduce((s, t) => {
+      const eff = t.date > feb1 ? t.date : feb1;
+      if (eff >= toDate) return s;
+      return s + bgInterestOnAmount(t.amount, eff, ratePeriods, toDate);
+    }, 0);
+    return { holding: h, txs, total, principal, interest: total - principal, thisYearInterest };
+  });
+  // Largest balances first so the summary reads top-down by size
+  perHolding.sort((a, b) => b.total - a.total);
+
+  const grandTotal = perHolding.reduce((s, p) => s + p.total, 0);
+  const grandPrincipal = perHolding.reduce((s, p) => s + p.principal, 0);
+  const grandInterest = grandTotal - grandPrincipal;
+  const grandThisYearInterest = perHolding.reduce((s, p) => s + p.thisYearInterest, 0);
+
+  // Combined "in the bank" over time: at each date, sum every account's
+  // balance-with-interest accrued to that date.
+  const allTxDates = allHoldingTxs.flat().map(t => t.date);
+  const chartDates = [...new Set([...allTxDates, toDate])].sort();
+  const chartValues = chartDates.map(d =>
+    perHolding.reduce((s, p) => s + bgTotalWithInterest(p.txs.filter(t => t.date <= d), ratePeriods, d), 0)
+  );
+  const hasChart = allTxDates.length > 0;
+
+  const pillsHTML = `<button class="pill-btn active" data-holding-id="summary">📊 Summary</button>` +
+    holdings.map(h => `<button class="pill-btn" data-holding-id="${h.id}">${bgHoldingName(h)}</button>`).join('') +
+    `<button class="pill-btn" id="bg-add-account">+ Add</button>`;
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen" id="bg-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.goBack()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span class="screen-title">Bank of Gilulu</span>
+        <div style="width:36px"></div>
+      </div>
+
+      <div style="padding:10px 12px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        ${pillsHTML}
+      </div>
+
+      <!-- Combined balance card -->
+      <div style="margin:12px;padding:20px;background:var(--card);border-radius:var(--radius);box-shadow:0 1px 4px rgba(0,0,0,.08)">
+        <div style="font-size:12px;color:var(--text-2);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px">
+          Total in the bank · ${holdings.length} account${holdings.length === 1 ? '' : 's'}
+        </div>
+        <div style="font-size:36px;font-weight:800;letter-spacing:-1px;color:${grandTotal >= 0 ? 'var(--text)' : 'var(--coral)'}">
+          ${bgFmt(grandTotal)}
+        </div>
+        <div style="font-size:12px;color:var(--text-2);margin-top:4px">
+          Combined balance with interest · ${new Date().toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}
+        </div>
+        <div style="display:flex;gap:12px;margin-top:14px">
+          <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">Net deposits</div>
+            <div style="font-size:14px;font-weight:700">${bgFmt(grandPrincipal)}</div>
+          </div>
+          <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">This year's interest</div>
+            <div style="font-size:14px;font-weight:700;color:#43a047">+${bgFmt(grandThisYearInterest)}</div>
+          </div>
+          <div style="flex:1;background:var(--bg);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:2px">All time interest</div>
+            <div style="font-size:14px;font-weight:700;color:#43a047">${grandInterest >= 0 ? '+' : ''}${bgFmt(grandInterest)}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Combined balance over time chart -->
+      ${hasChart ? `
+      <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);padding:14px 12px">
+        <div style="font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.4px;margin-bottom:10px">TOTAL IN THE BANK OVER TIME</div>
+        <div style="position:relative;height:180px"><canvas id="bg-summary-chart"></canvas></div>
+      </div>
+      ` : ''}
+
+      <!-- Per-account breakdown -->
+      <div style="margin:0 12px 8px;background:var(--card);border-radius:var(--radius);overflow:hidden">
+        <div style="font-size:11px;font-weight:600;color:var(--text-2);letter-spacing:.4px;padding:12px 14px 6px">ACCOUNTS</div>
+        ${perHolding.map(p => `
+          <div class="bg-holding-row" data-holding-id="${p.holding.id}" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-top:1px solid var(--border);cursor:pointer">
+            <span style="font-size:18px">🏦</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:15px">${bgHoldingName(p.holding)}</div>
+              <div style="font-size:11px;color:var(--text-2)">Net deposits ${bgFmt(p.principal)} · interest ${p.interest >= 0 ? '+' : ''}${bgFmt(p.interest)}</div>
+            </div>
+            <span style="font-weight:700;font-size:15px;color:${p.total >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(p.total)}</span>
+            <span class="settings-row-chevron">›</span>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Interest rate log button -->
+      <div style="padding:0 12px 80px">
+        <div class="settings-card">
+          <div class="settings-row" style="cursor:pointer" id="bg-rate-log-btn">
+            <span class="settings-row-icon">📈</span>
+            <span class="settings-row-label">Interest rate log</span>
+            <span style="margin-left:auto;color:var(--text-2);font-size:13px">${currentRate != null ? currentRate + '% p.a.' : 'Not set'}</span>
+            <span class="settings-row-chevron">›</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const screen = viewContainer.querySelector('#bg-screen');
+  screen.querySelectorAll('[data-holding-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const val = btn.dataset.holdingId;
+      renderBankGilulu(val === 'summary' ? 'summary' : Number(val));
+    });
+  });
+  screen.querySelector('#bg-add-account')?.addEventListener('click', () => openBgAccountEditor(null, () => renderBankGilulu()));
+  screen.querySelector('#bg-rate-log-btn')?.addEventListener('click', () => {
+    openBgRateLogEditor(() => renderBankGilulu('summary'));
+  });
+
+  const canvas = screen.querySelector('#bg-summary-chart');
+  if (canvas && hasChart) {
+    const range = Math.max(...chartValues) - Math.min(...chartValues);
+    const niceSteps = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
+    const step = niceSteps.find(s => range / s <= 7) ?? 10000;
+    new Chart(canvas, {
       type: 'line',
       data: {
         labels: chartDates.map(d => new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })),
