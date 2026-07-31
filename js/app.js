@@ -5511,6 +5511,36 @@ async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
 
   const canvas = screen.querySelector('#bg-summary-chart');
   if (canvas && hasChart) {
+    // Per-account palette for the overlaid lines; the combined total is drawn on
+    // top as a thicker blue line.
+    const palette = ['#e5533c', '#8e44ad', '#f39c12', '#16a085', '#c2185b', '#00838f', '#5d4037', '#7cb342'];
+    const accountSeries = perHolding.map((p, i) => {
+      const colour = palette[i % palette.length];
+      return {
+        label: bgHoldingName(p.holding),
+        data: chartDates.map(d => bgTotalWithInterest(p.txs.filter(t => t.date <= d), ratePeriods, d)),
+        borderColor: colour,
+        backgroundColor: colour,
+        fill: false,
+        tension: 0.3,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+      };
+    });
+    const totalSeries = {
+      label: 'Total',
+      data: chartValues,
+      borderColor: '#1a73e8',
+      backgroundColor: 'rgba(26,115,232,0.08)',
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2.5,
+      pointRadius: chartDates.length > 20 ? 0 : 3,
+      pointBackgroundColor: '#1a73e8',
+    };
+    // Only bother overlaying per-account lines when there's more than one account
+    const datasets = accountSeries.length > 1 ? [totalSeries, ...accountSeries] : [totalSeries];
     const range = Math.max(...chartValues) - Math.min(...chartValues);
     const niceSteps = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
     const step = niceSteps.find(s => range / s <= 7) ?? 10000;
@@ -5518,11 +5548,15 @@ async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
       type: 'line',
       data: {
         labels: chartDates.map(d => new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })),
-        datasets: [{ data: chartValues, borderColor: '#1a73e8', backgroundColor: 'rgba(26,115,232,0.08)', fill: true, tension: 0.3, pointRadius: chartDates.length > 20 ? 2 : 4, pointBackgroundColor: '#1a73e8' }],
+        datasets,
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '£' + ctx.parsed.y.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) } } },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: datasets.length > 1, position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, font: { size: 10 }, padding: 8, usePointStyle: true } },
+          tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: £` + ctx.parsed.y.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) } },
+        },
         scales: {
           x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 45 }, grid: { display: false } },
           y: { ticks: { font: { size: 10 }, callback: v => bgFmt(v), stepSize: step }, grid: { color: 'rgba(0,0,0,.06)' } },
@@ -5853,7 +5887,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 28 Jul 2026 at 12:30 BST (v52)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 31 Jul 2026 at 14:29 BST (v57)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
