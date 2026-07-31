@@ -56,7 +56,28 @@
   </div>
 
   <!-- Failsafe SW registration – runs even if app.js fails to parse -->
-  <script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'});</script>
+  <script>
+  if ('serviceWorker' in navigator) {
+    // Was a worker already controlling this page at startup? If so, a later
+    // controller change means a NEW version activated → reload once to pick it
+    // up. (On the very first visit there's no controller, so we don't reload.)
+    var hadController = !!navigator.serviceWorker.controller;
+    var reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (reloaded || !hadController) return;
+      reloaded = true;
+      window.location.reload();
+    });
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
+      // Re-check for a new version whenever the app regains focus. Installed
+      // mobile PWAs resume from a frozen state and otherwise rarely re-check
+      // sw.js, so updates can lag for days without this nudge.
+      var check = function () { reg.update().catch(function () {}); };
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+      window.addEventListener('focus', check);
+    }).catch(function () {});
+  }
+  </script>
   <!-- Dexie for IndexedDB -->
   <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
   <!-- Chart.js -->
