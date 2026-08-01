@@ -332,6 +332,7 @@ html, body {
 .sheet-body {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -808,7 +809,7 @@ html, body {
 
 .form-group { margin-bottom: 14px; }
 .form-label { font-size: 13px; color: var(--text-2); margin-bottom: 4px; display: block; }
-.form-input { width: 100%; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-size: 15px; background: var(--bg); outline: none; color: var(--text); transition: border-color .15s; }
+.form-input { width: 100%; max-width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-size: 15px; background: var(--bg); outline: none; color: var(--text); transition: border-color .15s; }
 .form-input:focus { border-color: var(--blue); }
 .form-select { width: 100%; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-size: 15px; background: var(--bg); outline: none; color: var(--text); appearance: none; -webkit-appearance: none; cursor: pointer; }
 .form-select:focus { border-color: var(--blue); }
