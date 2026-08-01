@@ -62,10 +62,12 @@
     // controller change means a NEW version activated → reload once to pick it
     // up. (On the very first visit there's no controller, so we don't reload.)
     var hadController = !!navigator.serviceWorker.controller;
-    var reloaded = false;
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (reloaded || !hadController) return;
-      reloaded = true;
+      // A new SW took control. If there was already a controller (i.e. this is an
+      // *update*, not the very first install), reload to run the new code.
+      // We don't guard with a reloaded flag here — location.reload() navigates
+      // away immediately, so this handler can only fire once per page load anyway.
+      if (!hadController) { hadController = true; return; }
       window.location.reload();
     });
     navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
