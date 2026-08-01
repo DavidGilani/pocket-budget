@@ -93,6 +93,7 @@ async function renderView(view) {
       case 'recurring':    state.recurringCycle = null; await renderRecurring(); break;
       case 'distributions':await renderDistributions(); break;
       case 'extraIncomes': await renderExtraIncomes(); break;
+      case 'taxReturns':   await renderTaxReturns(); break;
       case 'accounts':     await renderAccounts(); break;
       case 'netWealth':    await renderNetWealth(); break;
       case 'mortgageFree': await renderMortgageFree(); break;
@@ -1970,7 +1971,12 @@ function makeDistCard(d, catMap) {
   // flag is only set at save time, so a distribution that ran out naturally
   // would otherwise keep showing a full progress bar forever.
   const finished = d.endDate < today();
-  const progress = Math.min(100, Math.max(0, diffDays(d.startDate, today()) / Math.max(1, diffDays(d.startDate, d.endDate)) * 100));
+  // Days are credited inclusively: the money for the start day lands on day one,
+  // so on the first day 1 of the total slices is already done (not 0). Count
+  // today as an elapsed slice and use the inclusive total-day count.
+  const totalSlices = diffDays(d.startDate, d.endDate) + 1;
+  const elapsedSlices = diffDays(d.startDate, today()) + 1;
+  const progress = Math.min(100, Math.max(0, elapsedSlices / Math.max(1, totalSlices) * 100));
   return `
     <div class="dist-card" data-dist-id="${d.id}">
       <div class="dist-card-header"><span class="dist-card-name">${d.description}</span><span class="dist-card-amount">${fmt(Math.abs(d.totalAmount))}</span></div>
@@ -2044,6 +2050,125 @@ async function openDistEditor(id, isIncomeType = false) {
   const isIncomeDist = dist ? !!dist.isIncome : isIncomeType;
   const type = isIncomeDist ? 'income' : 'expense';
   await openEntry(type, null, dist, true);
+}
+
+// The UK tax year runs 6 April → 5 April. Any date before 6 April belongs to the
+// tax year that started in the previous calendar year. We identify a tax year by
+// its starting calendar year (e.g. 2026 = the 2026/27 tax year).
+function ukTaxYearStart(isoDate) {
+  const [y, m, d] = isoDate.split('-').map(Number);
+  return (m > 4 || (m === 4 && d >= 6)) ? y : y - 1;
+}
+function taxYearLabel(startYear) {
+  return `${startYear}/${String(startYear + 1).slice(2)}`;
+}
+
+// Tax Returns: a log, grouped by UK tax year, of every extra income logged — both
+// single entries and distributed (spread) ones — tagged with the "Extra income"
+// category specifically. Sales, gifts, investments and expenses are excluded.
+// Self Assessment deadlines (per gov.uk) for a tax year ending 5 April (Y+1):
+//   register by 5 Oct (Y+1) · paper return 31 Oct (Y+1) · online + pay 31 Jan (Y+2).
+async function renderTaxReturns() {
+  const cats = await db.categories.toArray();
+  const extraCat = cats.find(c => c.isIncome && c.name.trim().toLowerCase() === 'extra income');
+  const extraCatId = extraCat ? extraCat.id : 13;
+
+  // Single extra-income entries. Exclude distribution children (they carry a
+  // distributionId) so a spread income is counted once, via its parent below.
+  const allTxns = await db.transactions.toArray();
+  const singles = allTxns.filter(t => t.type === 'income' && !t.distributionId && t.categoryId === extraCatId);
+
+  // Distributed extra incomes — counted once at their full total, dated at the
+  // start of the range (when the money was received).
+  const allDists = await db.distributions.toArray();
+  const distIncomes = allDists.filter(d => d.isIncome && d.categoryId === extraCatId);
+
+  const events = [
+    ...singles.map(t => ({ date: t.date, endDate: null, description: (t.note || '').trim() || 'Extra income', amount: Math.abs(t.amount) })),
+    ...distIncomes.map(d => ({ date: d.startDate, endDate: d.endDate, description: (d.description || '').trim() || 'Extra income', amount: Math.abs(d.totalAmount) })),
+  ];
+
+  // Group by tax year (keyed on the start calendar year), newest first.
+  const byYear = {};
+  for (const ev of events) {
+    const ty = ukTaxYearStart(ev.date);
+    (byYear[ty] ??= []).push(ev);
+  }
+  const years = Object.keys(byYear).map(Number).sort((a, b) => b - a);
+
+  const todayStr = today();
+  const niceDate = iso => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  };
+
+  // Build a top reminder: the most pressing filing action across all tax years
+  // that have extra income. A return can only be filed once the tax year ends.
+  let reminderHtml = '';
+  if (years.length) {
+    // Earliest tax year whose online deadline hasn't yet passed and which has income.
+    const pending = years
+      .map(ty => ({ ty, yearEnd: `${ty + 1}-04-05`, filesFrom: `${ty + 1}-04-06`, online: `${ty + 2}-01-31` }))
+      .filter(r => r.online >= todayStr)
+      .sort((a, b) => a.online.localeCompare(b.online));
+    const r = pending[0];
+    if (r) {
+      const ended = r.yearEnd < todayStr;
+      reminderHtml = `
+        <div style="margin:12px;padding:14px 16px;background:var(--bg-2, #f5f5f7);border-radius:12px;border:1px solid var(--border)">
+          <div style="font-weight:600;font-size:14px;margin-bottom:6px">📋 Self Assessment reminder</div>
+          <div style="font-size:13px;color:var(--text-2);line-height:1.55">
+            ${ended
+              ? `Your <strong>${taxYearLabel(r.ty)}</strong> tax year has ended. You can file your return now — the online deadline (and any tax to pay) is <strong>${niceDate(r.online)}</strong>.`
+              : `The <strong>${taxYearLabel(r.ty)}</strong> tax year is still in progress (it ends 5 April ${r.ty + 1}). You'll be able to file from <strong>${niceDate(r.filesFrom)}</strong>, with an online deadline of <strong>${niceDate(r.online)}</strong>.`}
+            <br>Paper returns are due earlier, by <strong>${niceDate(`${r.ty + 1}-10-31`)}</strong>.
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  const sectionsHtml = years.map(ty => {
+    const list = byYear[ty].sort((a, b) => b.date.localeCompare(a.date));
+    const total = list.reduce((s, e) => s + e.amount, 0);
+    const online = `${ty + 2}-01-31`;
+    const rows = list.map(e => `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="min-width:0">
+          <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${e.description}</div>
+          <div style="font-size:12px;color:var(--text-2)">${e.endDate && e.endDate !== e.date ? `${fmtDate(e.date)} – ${fmtDate(e.endDate)}` : fmtDate(e.date)}</div>
+        </div>
+        <div style="font-size:14px;font-weight:600;color:var(--green, #43A047);white-space:nowrap">${fmt(e.amount)}</div>
+      </div>
+    `).join('');
+    return `
+      <div class="settings-section">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;padding:0 12px 6px">
+          <span class="settings-section-title" style="padding:0">${taxYearLabel(ty)} tax year</span>
+          <span style="font-size:15px;font-weight:700">${fmt(total)}</span>
+        </div>
+        <div class="settings-card">
+          ${rows}
+          <div style="font-size:11px;color:var(--text-2);padding-top:10px;line-height:1.5">
+            ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · Online return &amp; payment due ${niceDate(online)}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      <div class="screen-header">
+        <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+        <span class="screen-title">Tax Returns</span>
+        <div style="width:34px"></div>
+      </div>
+      ${reminderHtml}
+      ${years.length ? sectionsHtml : `<div class="empty-state"><div class="empty-icon">🧾</div><div class="empty-title">No extra income yet</div><div class="empty-text">Anything logged under the "Extra income" category — single or distributed — will appear here, grouped by UK tax year, to help with your Self Assessment.</div></div>`}
+      <div style="text-align:center;padding:8px 20px 24px;color:var(--text-2);font-size:11px;line-height:1.5">Only entries tagged "Extra income" are included. This is a personal record, not tax advice.</div>
+    </div>
+  `;
 }
 
 async function renderAccounts() {
@@ -5899,6 +6024,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-rec-income"><span class="settings-row-icon">💵</span><span class="settings-row-label">Recurring income</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-extra-incomes"><span class="settings-row-icon">💰</span><span class="settings-row-label">Extra incomes</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-bank-gilulu"><span class="settings-row-icon">🏦</span><span class="settings-row-label">Bank of Gilulu</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-tax-returns"><span class="settings-row-icon">🧾</span><span class="settings-row-label">Tax returns</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -5936,7 +6062,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 09:22 BST (v60)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 22:40 BST (v61)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -5952,6 +6078,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-charity').onclick = () => navigate('charity');
   viewContainer.querySelector('#nav-pension').onclick = () => navigate('pension');
   viewContainer.querySelector('#nav-bank-gilulu').onclick = () => navigate('bankGilulu');
+  viewContainer.querySelector('#nav-tax-returns').onclick = () => navigate('taxReturns');
   viewContainer.querySelector('#nav-import').onclick = () => navigate('import');
   viewContainer.querySelector('#export-btn').onclick = exportData;
   viewContainer.querySelector('#clear-btn').onclick = async () => {
@@ -6360,6 +6487,7 @@ init().catch(console.error);
     'breakdown', 'recurring', 'extraIncomes', 'distributions', 'netWealth',
     'mortgageFree', 'helpToBuy', 'investments', 'charity', 'pension',
     'bankGilulu', 'householdBills', 'accounts', 'yearlyTrends', 'import',
+    'taxReturns',
   ]);
   let startX = 0, startY = 0, tracking = false;
   viewContainer.addEventListener('touchstart', e => {
