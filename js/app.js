@@ -2084,8 +2084,8 @@ async function renderTaxReturns() {
   const distIncomes = allDists.filter(d => d.isIncome && d.categoryId === extraCatId);
 
   const events = [
-    ...singles.map(t => ({ date: t.date, endDate: null, description: (t.note || '').trim() || 'Extra income', amount: Math.abs(t.amount) })),
-    ...distIncomes.map(d => ({ date: d.startDate, endDate: d.endDate, description: (d.description || '').trim() || 'Extra income', amount: Math.abs(d.totalAmount) })),
+    ...singles.map(t => ({ id: t.id, kind: 'txn', date: t.date, endDate: null, description: (t.note || '').trim() || 'Extra income', amount: Math.abs(t.amount) })),
+    ...distIncomes.map(d => ({ id: d.id, kind: 'dist', date: d.startDate, endDate: d.endDate, description: (d.description || '').trim() || 'Extra income', amount: Math.abs(d.totalAmount) })),
   ];
 
   // Group by tax year (keyed on the start calendar year), newest first.
@@ -2133,12 +2133,15 @@ async function renderTaxReturns() {
     const total = list.reduce((s, e) => s + e.amount, 0);
     const online = `${ty + 2}-01-31`;
     const rows = list.map(e => `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div class="tax-entry-row" data-id="${e.id}" data-kind="${e.kind}" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer">
         <div style="min-width:0">
           <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${e.description}</div>
           <div style="font-size:12px;color:var(--text-2)">${e.endDate && e.endDate !== e.date ? `${fmtDate(e.date)} – ${fmtDate(e.endDate)}` : fmtDate(e.date)}</div>
         </div>
-        <div style="font-size:14px;font-weight:600;color:var(--green, #43A047);white-space:nowrap">${fmt(e.amount)}</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <div style="font-size:14px;font-weight:600;color:var(--green, #43A047);white-space:nowrap">${fmt(e.amount)}</div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="opacity:.35"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
       </div>
     `).join('');
     return `
@@ -2169,6 +2172,17 @@ async function renderTaxReturns() {
       <div style="text-align:center;padding:8px 20px 24px;color:var(--text-2);font-size:11px;line-height:1.5">Only entries tagged "Extra income" are included. This is a personal record, not tax advice.</div>
     </div>
   `;
+
+  delegate(viewContainer, 'click', '.tax-entry-row', async (e, el) => {
+    const id = Number(el.dataset.id);
+    const kind = el.dataset.kind;
+    if (kind === 'dist') {
+      await openDistEditor(id, true);
+    } else {
+      const txn = await db.transactions.get(id);
+      if (txn) await openEntry('income', txn);
+    }
+  });
 }
 
 async function renderAccounts() {
@@ -6062,7 +6076,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 22:40 BST (v61)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 22:54 BST (v62)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
