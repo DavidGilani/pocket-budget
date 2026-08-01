@@ -2743,6 +2743,31 @@ async function openWealthSnapshotEditor(existingDate) {
   const amountsByAccId = {};
   for (const a of editedAccounts) amountsByAccId[a.id] = existingVals[a.id] ?? null;
 
+  // For a brand-new snapshot, pre-fill the accounts that are tedious to look up:
+  //  • APCs and Property rarely change month-to-month → carry the last snapshot
+  //    value forward as a sensible starting point.
+  //  • Bank of Gilulu is derived from its own ledger → seed it from the live
+  //    combined balance, entered as a debt (negative) since it's owed to friends.
+  if (!existingDate) {
+    const allSnaps = await db.accountSnapshots.toArray();
+    const snapDates = [...new Set(allSnaps.map(s => s.date))].sort();
+    const lastSnapDate = snapDates[snapDates.length - 1];
+    const lastVals = {};
+    if (lastSnapDate) allSnaps.filter(s => s.date === lastSnapDate).forEach(s => { lastVals[s.accountId] = s.balance; });
+
+    const carryNames = ['apcs', 'property'];
+    for (const a of editedAccounts) {
+      if (carryNames.includes(a.name.trim().toLowerCase()) && lastVals[a.id] != null) {
+        amountsByAccId[a.id] = lastVals[a.id];
+      }
+    }
+    const bgAcc = editedAccounts.find(a => a.name.trim().toLowerCase() === 'bank of gilulu');
+    if (bgAcc) {
+      const bgTotal = await bankGiluluCombinedTotal();
+      if (bgTotal != null) amountsByAccId[bgAcc.id] = -Math.abs(bgTotal);
+    }
+  }
+
   const overlay = document.createElement('div');
   overlay.className = 'sheet-overlay';
   document.body.appendChild(overlay);
@@ -2754,6 +2779,10 @@ async function openWealthSnapshotEditor(existingDate) {
     // Preserve whatever date the user has set before re-rendering
     const existingDateInput = overlay.querySelector('#nw-e-date');
     if (existingDateInput && existingDateInput.value) currentDate = existingDateInput.value;
+    // Preserve scroll position: buildContent re-renders the whole sheet after
+    // each amount is entered, which would otherwise snap back to the top and
+    // force the user to scroll down again for every subsequent account.
+    const prevScroll = overlay.querySelector('.sheet-body')?.scrollTop ?? 0;
 
     const cashAccs = editedAccounts.filter(a => wealthGroupForAccount(a) === 'cash');
     const otherAccs = editedAccounts.filter(a => wealthGroupForAccount(a) === 'other');
@@ -2910,6 +2939,10 @@ async function openWealthSnapshotEditor(existingDate) {
       renderNetWealth();
       showToast('Snapshot saved');
     };
+
+    // Restore the pre-re-render scroll position (see prevScroll above).
+    const body = overlay.querySelector('.sheet-body');
+    if (body) body.scrollTop = prevScroll;
   }
 
   buildContent();
@@ -5146,6 +5179,22 @@ function bgTotalWithInterest(txs, ratePeriods, toDate) {
   }, 0);
 }
 
+// Combined balance held across every active Bank of Gilulu account (with
+// interest to today). This is money owed to friends, so callers treat it as a
+// debt. Returns null when there are no accounts.
+async function bankGiluluCombinedTotal() {
+  const holdings = await db.friendHoldings.filter(h => h.isActive !== false).toArray();
+  if (!holdings.length) return null;
+  const ratePeriods = await getGlobalRatePeriods();
+  const toDate = today();
+  let total = 0;
+  for (const h of holdings) {
+    const txs = await db.friendTransactions.where('holdingId').equals(h.id).sortBy('date');
+    total += bgTotalWithInterest(txs, ratePeriods, toDate);
+  }
+  return total;
+}
+
 async function renderBankGilulu(activeHoldingId = 'summary') {
   const holdings = await db.friendHoldings.filter(h => h.isActive !== false).toArray();
 
@@ -5887,7 +5936,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 31 Jul 2026 at 14:37 BST (v58)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 08:31 BST (v59)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
