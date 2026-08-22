@@ -767,10 +767,16 @@ async function renderTransactions() {
       .toArray();
   }
   txns.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-  if (query) txns = txns.filter(t => t.note?.toLowerCase().includes(query));
 
   const cats = await db.categories.toArray();
   const catMap = Object.fromEntries(cats.map(c => [c.id, c]));
+  // Match the query against the note AND the transaction's category name, so
+  // e.g. searching "charity" surfaces both items named "charity" and everything
+  // filed under the "Charity / gifts" category.
+  if (query) txns = txns.filter(t =>
+    t.note?.toLowerCase().includes(query) ||
+    catMap[t.categoryId]?.name?.toLowerCase().includes(query)
+  );
 
   // Rolling balance to end of month (or today if month is current/future)
   const effectiveDate = today() < monthEnd ? today() : monthEnd;
@@ -2068,6 +2074,78 @@ function taxYearLabel(startYear) {
 // category specifically. Sales, gifts, investments and expenses are excluded.
 // Self Assessment deadlines (per gov.uk) for a tax year ending 5 April (Y+1):
 //   register by 5 Oct (Y+1) · paper return 31 Oct (Y+1) · online + pay 31 Jan (Y+2).
+// The first tax year for which the extra "declarable" tools (taxable interest,
+// gift-aided donations) are offered. Earlier years pre-date this app's tracking.
+const TAX_TOOLS_FROM_YEAR = 2025;
+
+// Persisted-setting keys (synced like any other setting, keyed per tax year).
+const taxInterestKey = ty => `taxInterest_${ty}`;
+const taxGiftAidKey = ty => `taxGiftAid_${ty}`;
+
+// Every charity donation attributable to a tax year: the regular monthly
+// commitments (pro-rated to the months overlapping the year) plus any one-off
+// transactions / distributions filed under the "Charity / gifts" category.
+async function charityItemsForTaxYear(ty) {
+  const tyStart = `${ty}-04-06`, tyEnd = `${ty + 1}-04-05`;
+  const t = today();
+  const items = [];
+
+  const donations = await db.charityDonations.toArray();
+  for (const d of donations) {
+    if (!d.startDate) continue;
+    const e = d.endDate || t;
+    const oStart = d.startDate > tyStart ? d.startDate : tyStart;
+    const oEnd = e < tyEnd ? e : tyEnd;
+    if (oStart > oEnd) continue;
+    const months = charityMonthsActive(oStart, oEnd);
+    if (months <= 0) continue;
+    const monthly = Number(d.amount) || 0;
+    const amount = monthly * months;
+    if (amount <= 0) continue;
+    items.push({ key: `don:${d.id}`, label: d.charity || 'Donation', sub: `${months} mo × ${fmt(monthly)} · regular`, amount });
+  }
+
+  const cats = await db.categories.toArray();
+  const chCat = cats.find(c => !c.isIncome && (c.name || '').toLowerCase().includes('charity'));
+  if (chCat) {
+    const txns = await db.transactions.where('date').between(tyStart, tyEnd, true, true).toArray();
+    for (const x of txns) {
+      if (x.categoryId !== chCat.id || x.distributionId || x.type !== 'expense') continue;
+      const amt = Math.abs(x.amount);
+      if (amt <= 0) continue;
+      items.push({ key: `txn:${x.id}`, label: x.note || 'Charity / gift', sub: `${fmtDate(x.date)} · transaction`, amount: amt });
+    }
+    const dists = await db.distributions.toArray();
+    for (const ds of dists) {
+      if (ds.isIncome || ds.categoryId !== chCat.id) continue;
+      if (ds.startDate < tyStart || ds.startDate > tyEnd) continue;
+      const amt = Math.abs(ds.totalAmount);
+      if (amt <= 0) continue;
+      items.push({ key: `dist:${ds.id}`, label: ds.description || 'Charity / gift', sub: `${fmtDate(ds.startDate)} · distributed`, amount: amt });
+    }
+  }
+
+  items.sort((a, b) => b.amount - a.amount);
+  return items;
+}
+
+// Suggested accounts that may have earned taxable interest in a tax year: cash
+// accounts (bank/savings) that aren't ISAs and held some money by the year end.
+// Outgoing lines (credit cards, loans — isAsset:false) and ISAs are excluded.
+async function suggestInterestAccounts(ty) {
+  const tyEnd = `${ty + 1}-04-05`;
+  const accounts = await db.accounts.toArray();
+  const snaps = await db.accountSnapshots.toArray();
+  const hadMoney = {};
+  for (const s of snaps) {
+    if (s.date <= tyEnd && Math.abs(Number(s.balance) || 0) > 0) hadMoney[s.accountId] = true;
+  }
+  return accounts
+    .filter(a => ['bank', 'savings'].includes(a.type) && !(a.name || '').toLowerCase().includes('isa') && hadMoney[a.id])
+    .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
+    .map(a => ({ name: a.name, amount: 0 }));
+}
+
 async function renderTaxReturns() {
   const cats = await db.categories.toArray();
   const extraCat = cats.find(c => c.isIncome && c.name.trim().toLowerCase() === 'extra income');
@@ -2094,19 +2172,32 @@ async function renderTaxReturns() {
     const ty = ukTaxYearStart(ev.date);
     (byYear[ty] ??= []).push(ev);
   }
-  const years = Object.keys(byYear).map(Number).sort((a, b) => b - a);
 
   const todayStr = today();
+  const curTyStart = ukTaxYearStart(todayStr);
+
+  // Show a section for every year that has extra income, plus every completed
+  // tax year from TAX_TOOLS_FROM_YEAR onwards — those completed years get the
+  // taxable-interest / gift-aid tools even when there was no extra income.
+  const yearsSet = new Set(Object.keys(byYear).map(Number));
+  for (let ty = TAX_TOOLS_FROM_YEAR; ty < curTyStart; ty++) yearsSet.add(ty);
+  const years = [...yearsSet].sort((a, b) => b - a);
+
+  // Load any saved interest / gift-aid figures for the displayed years.
+  const interestByYear = {}, giftAidByYear = {};
+  for (const ty of years) {
+    interestByYear[ty] = await getSetting(taxInterestKey(ty));
+    giftAidByYear[ty] = await getSetting(taxGiftAidKey(ty));
+  }
+
   const niceDate = iso => {
     const [y, m, d] = iso.split('-').map(Number);
     return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   };
 
-  // Build a top reminder: the most pressing filing action across all tax years
-  // that have extra income. A return can only be filed once the tax year ends.
+  // Top reminder: the most pressing filing action across the displayed years.
   let reminderHtml = '';
   if (years.length) {
-    // Earliest tax year whose online deadline hasn't yet passed and which has income.
     const pending = years
       .map(ty => ({ ty, yearEnd: `${ty + 1}-04-05`, filesFrom: `${ty + 1}-04-06`, online: `${ty + 2}-01-31` }))
       .filter(r => r.online >= todayStr)
@@ -2128,10 +2219,28 @@ async function renderTaxReturns() {
     }
   }
 
+  const sumRow = (label, value, btn) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0">
+      <span style="font-size:13px;color:var(--text-2)">${label}</span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:14px;font-weight:600">${value}</span>
+        ${btn || ''}
+      </span>
+    </div>`;
+
   const sectionsHtml = years.map(ty => {
-    const list = byYear[ty].sort((a, b) => b.date.localeCompare(a.date));
-    const total = list.reduce((s, e) => s + e.amount, 0);
+    const list = (byYear[ty] || []).sort((a, b) => b.date.localeCompare(a.date));
+    const incomeTotal = list.reduce((s, e) => s + e.amount, 0);
     const online = `${ty + 2}-01-31`;
+    const completed = ty < curTyStart;
+    const toolsAvailable = completed && ty >= TAX_TOOLS_FROM_YEAR;
+
+    const interest = interestByYear[ty];
+    const giftAid = giftAidByYear[ty];
+    const interestTotal = interest ? (Number(interest.total) || 0) : 0;
+    const giftAidTotal = giftAid ? (Number(giftAid.total) || 0) : 0;
+    const taxableTotal = incomeTotal + interestTotal;
+
     const rows = list.map(e => `
       <div class="tax-entry-row" data-id="${e.id}" data-kind="${e.kind}" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer">
         <div style="min-width:0">
@@ -2144,16 +2253,40 @@ async function renderTaxReturns() {
         </div>
       </div>
     `).join('');
+
+    const smallBtn = (cls, label) => `<button class="${cls}" data-ty="${ty}" style="font-size:12px;font-weight:600;color:var(--blue);background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer">${label}</button>`;
+
+    // Interest & gift-aid summary rows (only once the tools are available).
+    const interestRow = toolsAvailable
+      ? sumRow('Taxable interest', interest ? fmt(interestTotal) : '—', smallBtn('tax-interest-btn', interest ? 'Edit' : 'Add'))
+      : '';
+    const giftAidRow = toolsAvailable
+      ? sumRow('Gift-aided donations', giftAid ? fmt(giftAidTotal) : '—', smallBtn('tax-charity-btn', giftAid ? 'Edit' : 'Add'))
+      : '';
+
+    const savedNote = [
+      interest ? `interest saved ${fmtDate(interest.savedAt.slice(0, 10))}` : '',
+      giftAid ? `gift aid saved ${fmtDate(giftAid.savedAt.slice(0, 10))}` : '',
+    ].filter(Boolean).join(' · ');
+
     return `
       <div class="settings-section">
         <div style="display:flex;justify-content:space-between;align-items:baseline;padding:0 12px 6px">
           <span class="settings-section-title" style="padding:0">${taxYearLabel(ty)} tax year</span>
-          <span style="font-size:15px;font-weight:700">${fmt(total)}</span>
+          ${completed ? '' : '<span style="font-size:11px;color:var(--text-2)">in progress</span>'}
         </div>
         <div class="settings-card">
           ${rows}
-          <div style="font-size:11px;color:var(--text-2);padding-top:10px;line-height:1.5">
-            ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · Online return &amp; payment due ${niceDate(online)}
+          <div style="padding-top:${list.length ? '8' : '2'}px">
+            ${sumRow('Extra income', fmt(incomeTotal), '')}
+            ${interestRow}
+            ${sumRow('Total taxable income', `<span style="color:var(--green,#43A047)">${fmt(taxableTotal)}</span>`, '')}
+            <div style="border-top:1px dashed var(--border);margin:4px 0"></div>
+            ${giftAidRow}
+          </div>
+          <div style="font-size:11px;color:var(--text-2);padding-top:8px;line-height:1.5">
+            Online return &amp; payment due ${niceDate(online)}${savedNote ? `<br>${savedNote}` : ''}
+            ${!toolsAvailable && ty >= TAX_TOOLS_FROM_YEAR ? `<br>Interest &amp; gift-aid tools unlock once the year ends (6 Apr ${ty + 1}).` : ''}
           </div>
         </div>
       </div>
@@ -2169,7 +2302,7 @@ async function renderTaxReturns() {
       </div>
       ${reminderHtml}
       ${years.length ? sectionsHtml : `<div class="empty-state"><div class="empty-icon">🧾</div><div class="empty-title">No extra income yet</div><div class="empty-text">Anything logged under the "Extra income" category — single or distributed — will appear here, grouped by UK tax year, to help with your Self Assessment.</div></div>`}
-      <div style="text-align:center;padding:8px 20px 24px;color:var(--text-2);font-size:11px;line-height:1.5">Only entries tagged "Extra income" are included. This is a personal record, not tax advice.</div>
+      <div style="text-align:center;padding:8px 20px 24px;color:var(--text-2);font-size:11px;line-height:1.5">Extra income is what's tagged "Extra income". Interest and gift-aided donations are what you confirm above. This is a personal record, not tax advice.</div>
     </div>
   `;
 
@@ -2183,6 +2316,138 @@ async function renderTaxReturns() {
       if (txn) await openEntry('income', txn);
     }
   });
+  delegate(viewContainer, 'click', '.tax-interest-btn', (e, el) => openTaxInterestEditor(Number(el.dataset.ty), renderTaxReturns));
+  delegate(viewContainer, 'click', '.tax-charity-btn', (e, el) => openTaxGiftAidEditor(Number(el.dataset.ty), renderTaxReturns));
+}
+
+// Confirm which charity donations in a tax year were gift-aided. The list is
+// rebuilt live from donations + charity/gifts transactions; ticks are persisted
+// so the total (the sum of ticked amounts) can be dropped straight into a return.
+async function openTaxGiftAidEditor(ty, onSaved) {
+  const items = await charityItemsForTaxYear(ty);
+  const saved = await getSetting(taxGiftAidKey(ty));
+  const confirmed = { ...(saved?.confirmed || {}) };
+  // Default: if nothing was ever saved, pre-tick everything (most donations are
+  // gift-aided); once the user has saved, respect exactly what they chose.
+  if (!saved) items.forEach(it => { confirmed[it.key] = true; });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const rowsHtml = items.map(it => `
+    <label class="ga-item" data-key="${it.key}" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer">
+      <input type="checkbox" class="ga-check" data-key="${it.key}" ${confirmed[it.key] ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--blue)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${it.label}</div>
+        <div style="font-size:12px;color:var(--text-2)">${it.sub}</div>
+      </div>
+      <div style="font-size:14px;font-weight:600;white-space:nowrap">${fmt(it.amount)}</div>
+    </label>
+  `).join('');
+
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:92vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">Gift-aided donations · ${taxYearLabel(ty)}</span><button class="sheet-close" id="ga-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(92vh - 60px)">
+        <div style="font-size:13px;color:var(--text-2);line-height:1.5;margin-bottom:10px">Tick each donation you paid under Gift Aid. The ticked total can be entered on your tax return.</div>
+        ${items.length ? rowsHtml : '<div style="padding:16px 0;color:var(--text-2);font-size:13px">No charity donations or charity/gift transactions found for this tax year.</div>'}
+        <div style="display:flex;justify-content:space-between;align-items:baseline;padding:14px 0 6px;font-weight:700">
+          <span>Gift-aided total</span><span id="ga-total">${fmt(0)}</span>
+        </div>
+        <button class="btn btn-primary btn-full" id="ga-save" style="margin-bottom:20px">Save</button>
+      </div>
+    </div>
+  `;
+
+  const amountFor = key => items.find(i => i.key === key)?.amount || 0;
+  const recalc = () => {
+    let total = 0;
+    overlay.querySelectorAll('.ga-check').forEach(c => { if (c.checked) total += amountFor(c.dataset.key); });
+    overlay.querySelector('#ga-total').textContent = fmt(total);
+    return total;
+  };
+  recalc();
+  overlay.querySelectorAll('.ga-check').forEach(c => c.addEventListener('change', recalc));
+  overlay.querySelector('#ga-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ga-save').onclick = async () => {
+    const conf = {};
+    overlay.querySelectorAll('.ga-check').forEach(c => { conf[c.dataset.key] = c.checked; });
+    const total = recalc();
+    const rec = { savedAt: new Date().toISOString(), total, confirmed: conf };
+    await setSetting(taxGiftAidKey(ty), rec);
+    queueWrite('settings', taxGiftAidKey(ty)).catch(() => {});
+    overlay.remove();
+    showToast('Gift Aid saved');
+    onSaved?.();
+  };
+}
+
+// Confirm taxable interest earned across cash accounts in a tax year. Seeded with
+// suggested accounts (editable / removable), plus free-form additions. The saved
+// total is shown against the year so it can be added to the return.
+async function openTaxInterestEditor(ty, onSaved) {
+  const saved = await getSetting(taxInterestKey(ty));
+  let rows = saved?.accounts ? saved.accounts.map(a => ({ name: a.name || '', amount: Number(a.amount) || 0 }))
+                             : await suggestInterestAccounts(ty);
+  if (!rows.length) rows = [{ name: '', amount: 0 }];
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:92vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">Taxable interest · ${taxYearLabel(ty)}</span><button class="sheet-close" id="ti-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(92vh - 60px)">
+        <div style="font-size:13px;color:var(--text-2);line-height:1.5;margin-bottom:10px">Enter the interest earned in each cash account this tax year. ISAs and outgoing accounts are excluded. Add or rename accounts as needed.</div>
+        <div id="ti-rows"></div>
+        <button class="btn btn-full" id="ti-add" style="margin-top:8px;border:1px dashed var(--border);background:none;color:var(--blue)">＋ Add account</button>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;padding:14px 0 6px;font-weight:700">
+          <span>Total taxable interest</span><span id="ti-total">${fmt(0)}</span>
+        </div>
+        <button class="btn btn-primary btn-full" id="ti-save" style="margin-bottom:20px">Save</button>
+      </div>
+    </div>
+  `;
+
+  const rowsWrap = overlay.querySelector('#ti-rows');
+  const recalc = () => {
+    const total = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    overlay.querySelector('#ti-total').textContent = fmt(total);
+    return total;
+  };
+  const renderRows = () => {
+    rowsWrap.innerHTML = rows.map((r, i) => `
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input class="form-input ti-name" data-i="${i}" type="text" value="${(r.name || '').replace(/"/g, '&quot;')}" placeholder="Account name" style="flex:1;min-width:0">
+        <input class="form-input ti-amt" data-i="${i}" type="number" step="0.01" inputmode="decimal" value="${r.amount || ''}" placeholder="0.00" style="width:110px">
+        <button class="ti-del" data-i="${i}" style="background:none;border:none;color:var(--red);font-size:20px;cursor:pointer;padding:0 4px">×</button>
+      </div>
+    `).join('');
+    rowsWrap.querySelectorAll('.ti-name').forEach(el => el.addEventListener('input', e => { rows[Number(e.target.dataset.i)].name = e.target.value; }));
+    rowsWrap.querySelectorAll('.ti-amt').forEach(el => el.addEventListener('input', e => { rows[Number(e.target.dataset.i)].amount = parseFloat(e.target.value) || 0; recalc(); }));
+    rowsWrap.querySelectorAll('.ti-del').forEach(el => el.addEventListener('click', e => { rows.splice(Number(e.currentTarget.dataset.i), 1); if (!rows.length) rows.push({ name: '', amount: 0 }); renderRows(); recalc(); }));
+  };
+  renderRows();
+  recalc();
+
+  overlay.querySelector('#ti-add').onclick = () => { rows.push({ name: '', amount: 0 }); renderRows(); };
+  overlay.querySelector('#ti-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ti-save').onclick = async () => {
+    const clean = rows.map(r => ({ name: (r.name || '').trim(), amount: Number(r.amount) || 0 })).filter(r => r.name || r.amount);
+    const total = clean.reduce((s, r) => s + r.amount, 0);
+    const rec = { savedAt: new Date().toISOString(), total, accounts: clean };
+    await setSetting(taxInterestKey(ty), rec);
+    queueWrite('settings', taxInterestKey(ty)).catch(() => {});
+    overlay.remove();
+    showToast('Interest saved');
+    onSaved?.();
+  };
 }
 
 async function renderAccounts() {
@@ -6076,7 +6341,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Aug 2026 at 23:01 BST (v63)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 22 Aug 2026 at 11:08 BST (v64)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
