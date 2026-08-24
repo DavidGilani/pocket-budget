@@ -5569,11 +5569,20 @@ function bgRateOn(dateStr, sortedAscPeriods) {
   return rate;
 }
 
+// The effective daily growth factor for an annual rate (%), such that
+// compounding it over 365 days reproduces exactly the stated annual rate:
+//   dailyFactor = (1 + annual)^(1/365)   e.g. 4.5% → 1.0001206015…
+// Using the nominal annual/365 instead would over-shoot (4.5% → ~4.6% a year).
+function bgDailyFactor(annualRatePct) {
+  return Math.pow(1 + annualRatePct / 100, 1 / 365);
+}
+
 // Daily-compounded balance of an account as of `toDate`. Deposits/withdrawals are
 // applied on their date, then the running balance grows each day by that day's
-// rate/365 — interest is added to the balance and itself earns interest the next
-// day (true daily compounding). A transaction on `toDate` earns no interest yet
-// (0 days elapsed), matching the intuition that interest accrues from the day
+// effective daily factor — interest is added to the balance and itself earns
+// interest the next day (true daily compounding), yet a full year still totals
+// exactly the p.a. rate the user set. A transaction on `toDate` earns no interest
+// yet (0 days elapsed), matching the intuition that interest accrues from the day
 // after money lands. Returns the principal-plus-interest total.
 function bgCompoundedTotal(txs, ratePeriods, toDate) {
   if (!txs.length) return 0;
@@ -5585,7 +5594,7 @@ function bgCompoundedTotal(txs, ratePeriods, toDate) {
   let d = sorted[0].date;
   while (d <= toDate) {
     if (byDate[d]) balance += byDate[d];
-    if (d < toDate && balance !== 0) balance *= 1 + bgRateOn(d, rates) / 100 / 365;
+    if (d < toDate && balance !== 0) balance *= bgDailyFactor(bgRateOn(d, rates));
     d = addDays(d, 1);
   }
   return balance;
@@ -6346,7 +6355,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 17:48 BST (v65)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 17:54 BST (v66)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
