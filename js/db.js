@@ -55,6 +55,14 @@ db.version(6).stores({
   apcPurchases: '++id, date',
 });
 
+// MoneyFriendOwe: informal money lent to friends (tickets, holidays, etc.) that
+// they need to pay back. Distinct from Bank of Gilulu (which holds their money
+// with interest). Each row: who owes, how much, when it was lent, and whether
+// it's been paid back.
+db.version(7).stores({
+  friendLoans: '++id, date, isPaid, person',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },

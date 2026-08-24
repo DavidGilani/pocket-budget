@@ -103,6 +103,7 @@ async function renderView(view) {
       case 'pension':      await renderPension(); break;
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
+      case 'moneyFriendOwe': await renderMoneyFriendOwe(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
@@ -4971,6 +4972,155 @@ async function openCharityEditor(existing, onSaved) {
   });
 }
 
+// ── MoneyFriendOwe: informal money lent to friends ────────────────────────────
+// A simple ledger of money owed to me by friends (tickets, holidays, etc.).
+// Outstanding loans are listed; ticking one marks it paid and tucks it into a
+// collapsible "Paid back" section so the live list stays short.
+async function renderMoneyFriendOwe() {
+  const loans = await db.friendLoans.toArray();
+  const outstanding = loans.filter(l => !l.isPaid).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const paid = loans.filter(l => l.isPaid).sort((a, b) => (b.paidDate || b.date || '').localeCompare(a.paidDate || a.date || ''));
+  const showPaid = state.mfoShowPaid === true;
+
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  const loanRow = (l, isPaidRow) => `
+    <div class="mfo-item" style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)">
+      <input type="checkbox" class="mfo-check" data-id="${l.id}" ${isPaidRow ? 'checked' : ''} style="width:20px;height:20px;flex-shrink:0;accent-color:var(--blue);cursor:pointer">
+      <div class="mfo-open" data-id="${l.id}" style="flex:1;min-width:0;cursor:pointer">
+        <div style="font-size:15px;font-weight:600;${isPaidRow ? 'text-decoration:line-through;color:var(--text-2)' : ''}">${l.person || 'Someone'}</div>
+        <div style="font-size:12px;color:var(--text-2)">Lent ${l.date ? fmtDate(l.date) : '—'}${isPaidRow && l.paidDate ? ` · paid ${fmtDate(l.paidDate)}` : ''}${l.note ? ` · ${l.note}` : ''}</div>
+      </div>
+      <div class="mfo-open" data-id="${l.id}" style="font-size:16px;font-weight:700;white-space:nowrap;cursor:pointer;${isPaidRow ? 'color:var(--text-2)' : ''}">${bgFmt(Math.abs(Number(l.amount) || 0))}</div>
+    </div>`;
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen" id="mfo-screen">
+      <div class="screen-header">
+        ${back}
+        <span class="screen-title">MoneyFriendOwe</span>
+        <button class="icon-btn" id="mfo-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+      </div>
+
+      <div style="padding:12px 16px 4px;font-size:13px;color:var(--text-2);line-height:1.5">Money friends owe me — tick a row once they've paid you back.</div>
+
+      <div style="padding:12px 12px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Outstanding</div>
+      ${outstanding.length === 0
+        ? `<div style="padding:8px 16px 4px;color:var(--text-2);font-size:14px">Nothing outstanding. Tap ＋ to log money you've lent.</div>`
+        : `<div class="settings-card" style="margin:4px 12px 0;padding:0">${outstanding.map(l => loanRow(l, false)).join('')}</div>`}
+
+      <div style="padding:16px 12px 6px">
+        <button class="btn btn-primary btn-full" id="mfo-add">＋ Log money lent</button>
+      </div>
+
+      ${paid.length > 0 ? `
+        <div style="padding:8px 12px 0">
+          <button id="mfo-toggle-paid" style="width:100%;display:flex;align-items:center;justify-content:space-between;background:none;border:none;cursor:pointer;padding:10px 4px;color:var(--text-2);font-size:13px;font-weight:600">
+            <span>Paid back (${paid.length})</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="transform:rotate(${showPaid ? '180' : '0'}deg);transition:transform .15s"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+        ${showPaid ? `<div class="settings-card" style="margin:0 12px 0;padding:0">${paid.map(l => loanRow(l, true)).join('')}</div>` : ''}
+      ` : ''}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const screen = viewContainer.querySelector('#mfo-screen');
+  const reRender = () => renderMoneyFriendOwe();
+  screen.querySelector('#mfo-add-btn').onclick = () => openLoanEditor(null, reRender);
+  screen.querySelector('#mfo-add').onclick = () => openLoanEditor(null, reRender);
+  screen.querySelector('#mfo-toggle-paid')?.addEventListener('click', () => { state.mfoShowPaid = !showPaid; reRender(); });
+
+  delegate(screen, 'click', '.mfo-open', (e, el) => {
+    const loan = loans.find(l => l.id === Number(el.dataset.id));
+    if (loan) openLoanEditor(loan, reRender);
+  });
+  delegate(screen, 'change', '.mfo-check', async (e, el) => {
+    const id = Number(el.dataset.id);
+    const paidNow = el.checked;
+    await db.friendLoans.update(id, { isPaid: paidNow, paidDate: paidNow ? today() : null });
+    queueWrite('friendLoans', id).catch(() => {});
+    if (paidNow) showToast('Marked as paid back');
+    reRender();
+  });
+}
+
+function openLoanEditor(existing, onSaved) {
+  let person = existing?.person ?? '';
+  let amount = Math.abs(Number(existing?.amount) || 0);
+  let date = existing?.date ?? today();
+  let note = existing?.note ?? '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">${existing ? 'Edit loan' : 'Log money lent'}</span>
+        <button class="sheet-close" id="lo-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Who owes me</label>
+          <input class="form-input" type="text" id="lo-person" value="${(person || '').replace(/"/g, '&quot;')}" placeholder="e.g. Alex" maxlength="120">
+        </div>
+        <div class="form-group" style="cursor:pointer" id="lo-amount-row">
+          <label class="form-label">Amount owed</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="lo-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? bgFmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="lo-date-row">
+          <label class="form-label">Date lent</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="lo-date-disp">${fmtDate(date)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" type="text" id="lo-note" value="${(note || '').replace(/"/g, '&quot;')}" placeholder="e.g. Coldplay tickets" maxlength="200">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="lo-del" style="margin-bottom:8px">Delete</button>` : ''}
+        <button class="btn btn-primary btn-full" id="lo-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#lo-close').onclick = () => overlay.remove();
+  overlay.querySelector('#lo-person').oninput = e => { person = e.target.value; };
+  overlay.querySelector('#lo-note').oninput = e => { note = e.target.value; };
+  overlay.querySelector('#lo-amount-row').onclick = () => openAmountPad('Amount owed', amount, v => { amount = Math.abs(v); overlay.querySelector('#lo-amount-disp').textContent = amount > 0 ? bgFmt(amount) : 'Tap to enter'; }, { noNegative: true });
+  overlay.querySelector('#lo-date-row').onclick = () => openDatePicker(date, today(), d => { date = d; overlay.querySelector('#lo-date-disp').textContent = fmtDate(d); });
+
+  overlay.querySelector('#lo-save').onclick = async () => {
+    if (!person.trim()) { showToast('Enter who owes you'); return; }
+    if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
+    const rec = { person: person.trim(), amount: amount || 0, date, note: note.trim() };
+    if (existing) {
+      await db.friendLoans.update(existing.id, rec);
+      queueWrite('friendLoans', existing.id).catch(() => {});
+    } else {
+      const id = await db.friendLoans.add({ ...rec, isPaid: false, paidDate: null });
+      queueWrite('friendLoans', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(existing ? 'Loan updated' : 'Loan logged');
+    onSaved?.();
+  };
+
+  overlay.querySelector('#lo-del')?.addEventListener('click', async () => {
+    if (!confirm('Delete this loan?')) return;
+    await db.friendLoans.delete(existing.id);
+    queueDelete('friendLoans', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Loan deleted');
+    onSaved?.();
+  });
+}
+
 // ── Financial goals: pension maximising ───────────────────────────────────────
 // Logs APC (Additional Pension Contribution) purchases — each buys a chunk of
 // extra *annual* pension into the LGPS pot. There's a lifetime cap on how much
@@ -6331,6 +6481,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-recurring"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Recurring expenses</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big Expenses</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household Bills (Rich)</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-money-owed"><span class="settings-row-icon">💸</span><span class="settings-row-label">MoneyFriendOwe</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -6360,7 +6511,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:12 BST (v68)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:41 BST (v69)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -6369,6 +6520,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-recurring').onclick = () => navigate('recurring', { recurringTab: 'expenses' });
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
+  viewContainer.querySelector('#nav-money-owed').onclick = () => navigate('moneyFriendOwe');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
   viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
@@ -6572,6 +6724,7 @@ async function handleImportFile(file) {
     await step('Importing friend data...', 90, async () => {
       if (data.friendHoldings?.length) { await db.friendHoldings.bulkPut(data.friendHoldings); stats.friendHoldings = data.friendHoldings.length; }
       if (data.friendTransactions?.length) { await db.friendTransactions.bulkPut(data.friendTransactions); stats.friendTransactions = data.friendTransactions.length; }
+      if (data.friendLoans?.length) { await db.friendLoans.bulkPut(data.friendLoans); stats.friendLoans = data.friendLoans.length; }
     });
     progFill.style.width = '100%'; progLabel.textContent = 'Complete!';
     resultDiv.style.display = 'block';
@@ -6591,12 +6744,12 @@ async function handleImportFile(file) {
 
 async function exportData() {
   showToast('Preparing export...');
-  const [transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions] = await Promise.all([
+  const [transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans] = await Promise.all([
     db.transactions.toArray(), db.categories.toArray(), db.recurringExpenses.toArray(), db.recurringIncome.toArray(),
     db.savingsTargets.toArray(), db.distributions.toArray(), db.accounts.toArray(),
-    db.accountSnapshots.toArray(), db.friendHoldings.toArray(), db.friendTransactions.toArray(),
+    db.accountSnapshots.toArray(), db.friendHoldings.toArray(), db.friendTransactions.toArray(), db.friendLoans.toArray(),
   ]);
-  const data = { transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, exportedAt: new Date().toISOString() };
+  const data = { transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans, exportedAt: new Date().toISOString() };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `pocket-ledger-backup-${today()}.json`; a.click();
@@ -6785,7 +6938,7 @@ init().catch(console.error);
     'breakdown', 'recurring', 'extraIncomes', 'distributions', 'netWealth',
     'mortgageFree', 'helpToBuy', 'investments', 'charity', 'pension',
     'bankGilulu', 'householdBills', 'accounts', 'yearlyTrends', 'import',
-    'taxReturns',
+    'taxReturns', 'moneyFriendOwe',
   ]);
   let startX = 0, startY = 0, tracking = false;
   viewContainer.addEventListener('touchstart', e => {
