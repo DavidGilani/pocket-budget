@@ -1031,7 +1031,7 @@ async function renderBreakdown() {
     'Extra income':      () => navigate('extraIncomes'),
     'Recurring expenses':() => navigate('recurring', { recurringTab: 'expenses' }),
     'Variable expenses': () => navigate('transactions'),
-    'Big Expenses':      () => navigate('distributions'),
+    'Big expenses':      () => navigate('distributions'),
   };
 
   viewContainer.innerHTML = `
@@ -1079,7 +1079,7 @@ async function renderBreakdown() {
               <div style="font-size:11px;font-weight:400;color:var(--text-2)">${fmt(Math.abs(bd.recurringExpenses / cycleLen))}/day</div>
             </div>
           </div>
-          ${[{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big Expenses', amount: bd.distributionExpenses }].filter(s => s.amount !== 0).map(s => `
+          ${[{ label: 'Recurring expenses', amount: bd.recurringExpenses }, { label: 'Variable expenses', amount: bd.variableExpenses }, { label: 'Big expenses', amount: bd.distributionExpenses }].filter(s => s.amount !== 0).map(s => `
             <div class="breakdown-sub-rows">
               <div class="breakdown-sub-row" data-nav="${s.label}" style="cursor:pointer">
                 <span class="breakdown-sub-label">${s.label}</span>
@@ -2006,7 +2006,7 @@ async function renderDistributions() {
     <div class="distributions-screen">
       <div class="screen-header">
         <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <span class="screen-title">Big Expenses</span>
+        <span class="screen-title">Big expenses</span>
         <button class="icon-btn" id="dist-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
       ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
@@ -4998,7 +4998,7 @@ async function renderMoneyFriendOwe() {
     <div class="settings-screen" id="mfo-screen">
       <div class="screen-header">
         ${back}
-        <span class="screen-title">MoneyFriendOwe</span>
+        <span class="screen-title">Money friends owe</span>
         <button class="icon-btn" id="mfo-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
 
@@ -6479,9 +6479,9 @@ async function renderSettings() {
         <div class="settings-section-title">Costs</div>
         <div class="settings-card">
           <div class="settings-row" id="nav-recurring"><span class="settings-row-icon">🔄</span><span class="settings-row-label">Recurring expenses</span><span class="settings-row-chevron">›</span></div>
-          <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big Expenses</span><span class="settings-row-chevron">›</span></div>
-          <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household Bills (Rich)</span><span class="settings-row-chevron">›</span></div>
-          <div class="settings-row" id="nav-money-owed"><span class="settings-row-icon">💸</span><span class="settings-row-label">MoneyFriendOwe</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big expenses</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household bills (Rich)</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-money-owed"><span class="settings-row-icon">💸</span><span class="settings-row-label">Money friends owe</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -6511,7 +6511,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:41 BST (v69)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:48 BST (v70)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
