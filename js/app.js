@@ -5665,9 +5665,14 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
   // This-year interest: compounded interest accrued since Feb 1 of this year.
   const thisYearInterest = bgInterestBetween(allTxs, ratePeriods, feb1, toDate);
 
-  // Per-row running balance is now pure principal (prior balance ± this amount),
-  // with no interest baked in — interest lives only in the headline figure.
-  const txsWithBalance = bgRunningBalance(allTxs).map(t => ({ ...t, runningBalance: t.balance }));
+  // Per-row balance is the account's total *including interest* as of that row's
+  // date — i.e. the daily-compounded value of every transaction up to and
+  // including that date. A withdrawal that clears the account therefore shows a
+  // £0.00 balance on its date.
+  const txsWithBalance = allTxs.map(t => {
+    const upTo = allTxs.filter(x => x.date <= t.date);
+    return { ...t, runningBalance: bgCompoundedTotal(upTo, ratePeriods, t.date) };
+  });
   const displayTxs = [...txsWithBalance].reverse(); // newest first
 
   function tabsHTML() {
@@ -5699,11 +5704,11 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
           <tr style="border-top:2px solid var(--border);background:var(--bg)">
             <td style="padding:8px;font-weight:700;font-size:12px;color:var(--text-2)">TOTAL</td>
             <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(principalTotal)}</td>
-            <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(principalTotal)}</td>
+            <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(totalWithInterest)}</td>
           </tr>
         </tbody>
       </table>
-      <div style="padding:8px 10px;font-size:11px;color:var(--text-2);text-align:right">Balances shown are principal only. Interest (${interestEarned >= 0 ? '+' : ''}${bgFmt(interestEarned)}) is applied daily and included in the headline balance above.</div>
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-2);text-align:right">Balance is the account total (including interest compounded daily) as of each date. The TOTAL row shows today's balance.</div>
     `;
   }
 
@@ -6355,7 +6360,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:04 BST (v67)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:12 BST (v68)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
