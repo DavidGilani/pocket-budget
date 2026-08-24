@@ -5559,28 +5559,47 @@ async function getGlobalRatePeriods() {
   return [];
 }
 
-// Simple interest: amount * rate * days / 365, split across rate periods
-function bgInterestOnAmount(amount, txDate, ratePeriods, toDate) {
-  if (amount === 0 || ratePeriods.length === 0) return 0;
-  const sorted = [...ratePeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
-  let interest = 0;
-  for (let i = 0; i < sorted.length; i++) {
-    const periodStart = sorted[i].fromDate;
-    const periodEnd = i + 1 < sorted.length ? sorted[i + 1].fromDate : toDate;
-    const start = txDate > periodStart ? txDate : periodStart;
-    const end = periodEnd < toDate ? periodEnd : toDate;
-    if (start >= end) continue;
-    const days = diffDays(start, end);
-    interest += amount * sorted[i].rate / 100 * days / 365;
+// The annual rate (%) in effect on a given ISO date. Each rate-log entry applies
+// from its fromDate until the next entry; before the first entry, no interest.
+function bgRateOn(dateStr, sortedAscPeriods) {
+  let rate = 0;
+  for (const p of sortedAscPeriods) {
+    if (p.fromDate <= dateStr) rate = p.rate; else break;
   }
-  return interest;
+  return rate;
 }
 
-// Total with interest: each transaction accrues simple interest from its date to toDate
-function bgTotalWithInterest(txs, ratePeriods, toDate) {
-  return txs.reduce((sum, t) => {
-    return sum + t.amount + bgInterestOnAmount(t.amount, t.date, ratePeriods, toDate);
-  }, 0);
+// Daily-compounded balance of an account as of `toDate`. Deposits/withdrawals are
+// applied on their date, then the running balance grows each day by that day's
+// rate/365 — interest is added to the balance and itself earns interest the next
+// day (true daily compounding). A transaction on `toDate` earns no interest yet
+// (0 days elapsed), matching the intuition that interest accrues from the day
+// after money lands. Returns the principal-plus-interest total.
+function bgCompoundedTotal(txs, ratePeriods, toDate) {
+  if (!txs.length) return 0;
+  const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
+  const rates = [...ratePeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
+  const byDate = {};
+  for (const t of sorted) byDate[t.date] = (byDate[t.date] || 0) + t.amount;
+  let balance = 0;
+  let d = sorted[0].date;
+  while (d <= toDate) {
+    if (byDate[d]) balance += byDate[d];
+    if (d < toDate && balance !== 0) balance *= 1 + bgRateOn(d, rates) / 100 / 365;
+    d = addDays(d, 1);
+  }
+  return balance;
+}
+
+// Interest earned in the window (fromDate, toDate]: the change in compounded
+// value, less any net deposits made inside the window. Works with compounding
+// because value(to) = value(from) grown by interest + those deposits (+ their
+// own interest), so subtracting the raw deposits leaves just the interest.
+function bgInterestBetween(txs, ratePeriods, fromDate, toDate) {
+  const vFrom = bgCompoundedTotal(txs, ratePeriods, fromDate);
+  const vTo = bgCompoundedTotal(txs, ratePeriods, toDate);
+  const deposits = txs.filter(t => t.date > fromDate && t.date <= toDate).reduce((s, t) => s + t.amount, 0);
+  return vTo - vFrom - deposits;
 }
 
 // Combined balance held across every active Bank of Gilulu account (with
@@ -5594,7 +5613,7 @@ async function bankGiluluCombinedTotal() {
   let total = 0;
   for (const h of holdings) {
     const txs = await db.friendTransactions.where('holdingId').equals(h.id).sortBy('date');
-    total += bgTotalWithInterest(txs, ratePeriods, toDate);
+    total += bgCompoundedTotal(txs, ratePeriods, toDate);
   }
   return total;
 }
@@ -5622,8 +5641,8 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
     ? await db.friendTransactions.where('holdingId').equals(holding.id).sortBy('date')
     : [];
 
-  // Total with interest per the spreadsheet formula
-  const totalWithInterest = bgTotalWithInterest(allTxs, ratePeriods, toDate);
+  // Daily-compounded balance with interest to today.
+  const totalWithInterest = bgCompoundedTotal(allTxs, ratePeriods, toDate);
   const principalTotal = allTxs.reduce((s, t) => s + t.amount, 0);
   const interestEarned = totalWithInterest - principalTotal;
 
@@ -5634,18 +5653,12 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
     .filter(t => t.date >= feb1)
     .reduce((s, t) => s + t.amount, 0);
 
-  // This-year interest: accrued from Feb 1 of current year
-  const thisYearInterest = allTxs.reduce((sum, t) => {
-    const effectiveStart = t.date > feb1 ? t.date : feb1;
-    if (effectiveStart >= toDate) return sum;
-    return sum + bgInterestOnAmount(t.amount, effectiveStart, ratePeriods, toDate);
-  }, 0);
+  // This-year interest: compounded interest accrued since Feb 1 of this year.
+  const thisYearInterest = bgInterestBetween(allTxs, ratePeriods, feb1, toDate);
 
-  // Pre-compute running balance (total with interest to today) at each tx, ascending
-  const txsWithBalance = allTxs.map((t, i) => {
-    const txsUpTo = allTxs.slice(0, i + 1);
-    return { ...t, runningBalance: bgTotalWithInterest(txsUpTo, ratePeriods, toDate) };
-  });
+  // Per-row running balance is now pure principal (prior balance ± this amount),
+  // with no interest baked in — interest lives only in the headline figure.
+  const txsWithBalance = bgRunningBalance(allTxs).map(t => ({ ...t, runningBalance: t.balance }));
   const displayTxs = [...txsWithBalance].reverse(); // newest first
 
   function tabsHTML() {
@@ -5663,29 +5676,25 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
           <tr style="border-bottom:1.5px solid var(--border)">
             <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">DATE</th>
             <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">AMOUNT</th>
-            <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">INTEREST</th>
             <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--text-2);font-size:11px">BALANCE</th>
           </tr>
         </thead>
         <tbody>
           ${displayTxs.map(t => {
-            const interest = bgInterestOnAmount(t.amount, t.date, ratePeriods, toDate);
-            const days = diffDays(t.date, toDate);
             return `<tr class="bg-tx-row" data-tx-id="${t.id}" style="border-bottom:1px solid var(--border);cursor:pointer">
-              <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}<br><span style="font-size:10px">${days}d</span></td>
+              <td style="padding:8px;white-space:nowrap;color:var(--text-2)">${new Date(t.date + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'2-digit' })}</td>
               <td style="padding:8px;text-align:right;font-weight:600;color:${t.amount >= 0 ? '#43a047' : 'var(--coral)'}">${t.amount >= 0 ? '+' : ''}${bgFmt(t.amount)}</td>
-              <td style="padding:8px;text-align:right;color:${interest >= 0 ? '#43a047' : 'var(--coral)'}">${interest >= 0 ? '+' : ''}${bgFmt(interest)}</td>
               <td style="padding:8px;text-align:right;font-weight:700;color:${t.runningBalance >= 0 ? 'var(--text)' : 'var(--coral)'}">${bgFmt(t.runningBalance)}</td>
             </tr>`;
           }).join('')}
           <tr style="border-top:2px solid var(--border);background:var(--bg)">
             <td style="padding:8px;font-weight:700;font-size:12px;color:var(--text-2)">TOTAL</td>
             <td style="padding:8px;text-align:right;font-weight:700">${bgFmt(principalTotal)}</td>
-            <td style="padding:8px;text-align:right;font-weight:700;color:${interestEarned >= 0 ? '#43a047' : 'var(--coral)'};">${interestEarned >= 0 ? '+' : ''}${bgFmt(interestEarned)}</td>
-            <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(totalWithInterest)}</td>
+            <td style="padding:8px;text-align:right;font-weight:800;font-size:14px">${bgFmt(principalTotal)}</td>
           </tr>
         </tbody>
       </table>
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-2);text-align:right">Balances shown are principal only. Interest (${interestEarned >= 0 ? '+' : ''}${bgFmt(interestEarned)}) is applied daily and included in the headline balance above.</div>
     `;
   }
 
@@ -5810,7 +5819,7 @@ async function renderBankGilulu(activeHoldingId = 'summary') {
     const chartDates = [...new Set([...sortedTxs.map(t => t.date), toDate])].sort();
     const chartValues = chartDates.map(d => {
       const txsUpTo = sortedTxs.filter(t => t.date <= d);
-      return bgTotalWithInterest(txsUpTo, ratePeriods, d);
+      return bgCompoundedTotal(txsUpTo, ratePeriods, d);
     });
     const range = Math.max(...chartValues) - Math.min(...chartValues);
     const niceSteps = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
@@ -5841,13 +5850,9 @@ async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
 
   const perHolding = holdings.map((h, i) => {
     const txs = allHoldingTxs[i];
-    const total = bgTotalWithInterest(txs, ratePeriods, toDate);
+    const total = bgCompoundedTotal(txs, ratePeriods, toDate);
     const principal = txs.reduce((s, t) => s + t.amount, 0);
-    const thisYearInterest = txs.reduce((s, t) => {
-      const eff = t.date > feb1 ? t.date : feb1;
-      if (eff >= toDate) return s;
-      return s + bgInterestOnAmount(t.amount, eff, ratePeriods, toDate);
-    }, 0);
+    const thisYearInterest = bgInterestBetween(txs, ratePeriods, feb1, toDate);
     return { holding: h, txs, total, principal, interest: total - principal, thisYearInterest };
   });
   // Largest balances first so the summary reads top-down by size
@@ -5863,7 +5868,7 @@ async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
   const allTxDates = allHoldingTxs.flat().map(t => t.date);
   const chartDates = [...new Set([...allTxDates, toDate])].sort();
   const chartValues = chartDates.map(d =>
-    perHolding.reduce((s, p) => s + bgTotalWithInterest(p.txs.filter(t => t.date <= d), ratePeriods, d), 0)
+    perHolding.reduce((s, p) => s + bgCompoundedTotal(p.txs.filter(t => t.date <= d), ratePeriods, d), 0)
   );
   const hasChart = allTxDates.length > 0;
 
@@ -5971,7 +5976,7 @@ async function renderBgSummary(holdings, ratePeriods, currentRate, toDate) {
       const colour = palette[i % palette.length];
       return {
         label: bgHoldingName(p.holding),
-        data: chartDates.map(d => bgTotalWithInterest(p.txs.filter(t => t.date <= d), ratePeriods, d)),
+        data: chartDates.map(d => bgCompoundedTotal(p.txs.filter(t => t.date <= d), ratePeriods, d)),
         borderColor: colour,
         backgroundColor: colour,
         fill: false,
@@ -6341,7 +6346,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 22 Aug 2026 at 11:08 BST (v64)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 17:48 BST (v65)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
