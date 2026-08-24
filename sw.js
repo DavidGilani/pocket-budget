@@ -1,6 +1,6 @@
 // Pocket Ledger Service Worker
 
-const CACHE = 'pocket-ledger-v66';
+const CACHE = 'pocket-ledger-v67';
 const APP_SHELL = [
   './',
   './index.html',
@@ -29,6 +29,11 @@ self.addEventListener('install', event => {
     })
   );
   self.skipWaiting();
+});
+
+// Backstop: the page can ask a freshly-installed worker to take over immediately.
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {

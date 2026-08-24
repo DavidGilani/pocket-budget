@@ -71,12 +71,29 @@
       window.location.reload();
     });
     navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
-      // Re-check for a new version whenever the app regains focus. Installed
-      // mobile PWAs resume from a frozen state and otherwise rarely re-check
-      // sw.js, so updates can lag for days without this nudge.
+      // Re-check for a new version aggressively. Installed mobile PWAs resume
+      // from a frozen / bfcache state and don't reliably fire focus or
+      // visibilitychange, so updates can lag for days. Cover every resume signal
+      // we can, check immediately on load, and poll while the app is open.
       var check = function () { reg.update().catch(function () {}); };
+      check();
       document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
       window.addEventListener('focus', check);
+      window.addEventListener('pageshow', check);       // fires on bfcache restore (mobile resume)
+      window.addEventListener('online', check);
+      setInterval(function () { if (!document.hidden) check(); }, 60 * 1000);
+      // When a new worker finishes installing while an old one still controls the
+      // page, tell it to activate now. sw.js already calls skipWaiting(); this is
+      // a backstop for browsers that don't honour it on their own.
+      reg.addEventListener('updatefound', function () {
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function () {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            try { nw.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+          }
+        });
+      });
     }).catch(function () {});
   }
   </script>
