@@ -949,7 +949,7 @@ async function showMonthPicker() {
     <div class="sheet" style="max-height:80vh">
       <div class="sheet-handle"></div>
       <div class="sheet-header">
-        <span class="sheet-title">Select Month</span>
+        <span class="sheet-title">Select month</span>
         <button class="sheet-close" id="month-close">✕</button>
       </div>
       <div class="sheet-body" style="padding:0;overflow-y:auto">
@@ -1040,7 +1040,7 @@ async function renderBreakdown() {
         <button class="icon-btn" onclick="window.app.goBack()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
-        <span class="screen-title">Daily Budget</span>
+        <span class="screen-title">Daily budget</span>
         <div style="width:34px"></div>
       </div>
       <div class="breakdown-cycle-nav">
@@ -1367,7 +1367,7 @@ async function openRecurringEditor(id, type) {
     <div class="sheet">
       <div class="sheet-handle"></div>
       <div class="sheet-header">
-        <span class="sheet-title">${item ? 'Edit' : 'Add'} ${isExpense ? 'Recurring Expense' : 'Recurring Income'}</span>
+        <span class="sheet-title">${item ? 'Edit' : 'Add'} ${isExpense ? 'Recurring expense' : 'Recurring income'}</span>
         <button class="sheet-close" id="rec-close">✕</button>
       </div>
       <div class="sheet-body" style="padding:16px">
@@ -1799,7 +1799,7 @@ async function renderYearlyTrends() {
         <button class="icon-btn" id="yt-back">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
-        <span class="screen-title">${year} · Yearly Trends</span>
+        <span class="screen-title">${year} · Yearly trends</span>
         <div style="display:flex;gap:0">
           <button class="icon-btn" id="yt-prev">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -2034,7 +2034,7 @@ async function renderExtraIncomes() {
     <div class="distributions-screen">
       <div class="screen-header">
         <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <span class="screen-title">Extra Incomes</span>
+        <span class="screen-title">Extra incomes</span>
         <button class="icon-btn" id="extra-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
       </div>
       ${active.length > 0 ? `<div style="padding:12px 12px 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">Active</div>${active.map(d => makeDistCard(d, catMap)).join('')}` : ''}
@@ -2298,7 +2298,7 @@ async function renderTaxReturns() {
     <div class="settings-screen">
       <div class="screen-header">
         <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <span class="screen-title">Tax Returns</span>
+        <span class="screen-title">Tax returns</span>
         <div style="width:34px"></div>
       </div>
       ${reminderHtml}
@@ -2501,7 +2501,7 @@ async function openSnapshotEntry(accounts, latest) {
   overlay.innerHTML = `
     <div class="sheet">
       <div class="sheet-handle"></div>
-      <div class="sheet-header"><span class="sheet-title">Record Balances</span><button class="sheet-close" id="snap-close">✕</button></div>
+      <div class="sheet-header"><span class="sheet-title">Record balances</span><button class="sheet-close" id="snap-close">✕</button></div>
       <div class="sheet-body" style="padding:16px">
         <div class="form-group"><label class="form-label">Date</label><input class="form-input" id="snap-date" type="date" value="${today()}"></div>
         ${accounts.map(acc => {
@@ -2558,7 +2558,7 @@ async function openSavingsSheet() {
     <div class="sheet" style="max-height:80vh">
       <div class="sheet-handle"></div>
       <div class="sheet-header">
-        <span class="sheet-title">Savings Targets</span>
+        <span class="sheet-title">Savings targets</span>
         <button class="sheet-close" id="sav-close">✕</button>
       </div>
       <div style="padding:0 12px 8px">
@@ -2582,7 +2582,7 @@ async function openSavingsSheet() {
       <div class="sheet">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <span class="sheet-title">${isNew ? 'Add' : 'Edit'} Savings Target</span>
+          <span class="sheet-title">${isNew ? 'Add' : 'Edit'} savings target</span>
           <button class="sheet-close" id="sav-e-close">✕</button>
         </div>
         <div class="sheet-body" style="padding:16px">
@@ -2924,7 +2924,7 @@ async function renderNetWealth() {
         <button class="icon-btn" onclick="window.app.goBack()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
-        <span class="screen-title">Net Wealth</span>
+        <span class="screen-title">Net wealth</span>
         <button class="icon-btn" id="nw-add-btn">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
@@ -3221,7 +3221,7 @@ async function openWealthSnapshotEditor(existingDate) {
       <div class="sheet" style="max-height:92vh">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <span class="sheet-title">${existingDate ? 'Edit' : 'New'} Snapshot</span>
+          <span class="sheet-title">${existingDate ? 'Edit' : 'New'} snapshot</span>
           <button class="sheet-close" id="nw-e-close">✕</button>
         </div>
         <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(92vh - 60px)">
@@ -3681,7 +3681,7 @@ async function openTransferEditor(existing) {
       <div class="sheet">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <span class="sheet-title">${existing ? 'Edit' : 'Log'} Transfer</span>
+          <span class="sheet-title">${existing ? 'Edit' : 'Log'} transfer</span>
           <button class="sheet-close" id="tf-close">✕</button>
         </div>
         <div class="sheet-body" style="padding:16px">
@@ -6511,7 +6511,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Aug 2026 at 18:48 BST (v70)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Aug 2026 at 07:54 BST (v71)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -6658,7 +6658,7 @@ function renderImport() {
     <div class="import-screen">
       <div class="screen-header" style="padding-top:52px">
         <button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <span class="screen-title">Import Data</span>
+        <span class="screen-title">Import data</span>
         <div style="width:34px"></div>
       </div>
       <div style="padding:16px">
