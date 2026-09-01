@@ -2179,11 +2179,12 @@ async function renderTaxReturns() {
   const todayStr = today();
   const curTyStart = ukTaxYearStart(todayStr);
 
-  // Show a section for every year that has extra income, plus every completed
-  // tax year from TAX_TOOLS_FROM_YEAR onwards — those completed years get the
-  // taxable-interest / gift-aid tools even when there was no extra income.
+  // Show a section for every year that has extra income, plus every tax year
+  // from TAX_TOOLS_FROM_YEAR up to and including the current one — those get the
+  // taxable-interest / gift-aid / estimate tools even before the year ends and
+  // even with no extra income (so donations can be tracked through the year).
   const yearsSet = new Set(Object.keys(byYear).map(Number));
-  for (let ty = TAX_TOOLS_FROM_YEAR; ty < curTyStart; ty++) yearsSet.add(ty);
+  for (let ty = TAX_TOOLS_FROM_YEAR; ty <= curTyStart; ty++) yearsSet.add(ty);
   const years = [...yearsSet].sort((a, b) => b - a);
 
   // Load any saved interest / gift-aid figures for the displayed years.
@@ -2236,7 +2237,10 @@ async function renderTaxReturns() {
     const incomeTotal = list.reduce((s, e) => s + e.amount, 0);
     const online = `${ty + 2}-01-31`;
     const completed = ty < curTyStart;
-    const toolsAvailable = completed && ty >= TAX_TOOLS_FROM_YEAR;
+    const isCurrent = ty === curTyStart;
+    // Tools (interest, gift aid, estimate) are offered for 2025/26 onwards,
+    // including the current in-progress year for a running view.
+    const toolsAvailable = ty >= TAX_TOOLS_FROM_YEAR && ty <= curTyStart;
 
     const interest = interestByYear[ty];
     const giftAid = giftAidByYear[ty];
@@ -2289,7 +2293,8 @@ async function renderTaxReturns() {
           </div>
           <div style="font-size:11px;color:var(--text-2);padding-top:8px;line-height:1.5">
             Online return &amp; payment due ${niceDate(online)}${savedNote ? `<br>${savedNote}` : ''}
-            ${!toolsAvailable && ty >= TAX_TOOLS_FROM_YEAR ? `<br>Interest &amp; gift-aid tools unlock once the year ends (6 Apr ${ty + 1}).` : ''}
+            ${isCurrent ? '<br>This year is still in progress — figures update as you add income and donations.' : ''}
+            ${!toolsAvailable ? '<br>Interest &amp; gift-aid tools apply to 2025/26 onwards.' : ''}
           </div>
         </div>
       </div>
@@ -5406,7 +5411,7 @@ async function renderTripDetail() {
 
       <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 14px 4px">
         <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">People</span>
-        <button id="trip-add-person" style="font-size:13px;font-weight:600;color:var(--blue);background:none;border:none;cursor:pointer">＋ Add person</button>
+        <button id="trip-add-person" style="font-size:13px;font-weight:600;color:var(--blue);background:none;border:none;cursor:pointer">＋ Add people</button>
       </div>
       ${peopleHtml}
 
@@ -5425,7 +5430,7 @@ async function renderTripDetail() {
 
   const screen = viewContainer.querySelector('#trip-detail-screen');
   screen.querySelector('#trip-rename-btn').onclick = () => openTripEditor(trip, () => reRender());
-  screen.querySelector('#trip-add-person').onclick = () => openTripPersonEditor(tripId, null, reRender);
+  screen.querySelector('#trip-add-person').onclick = () => openAddPeople(tripId, reRender);
   screen.querySelector('#trip-add-spend')?.addEventListener('click', () => { if (people.length) openSpendEditor(tripId, null, people, reRender); });
   delegate(screen, 'click', '.trip-person-row', (e, el) => {
     const person = people.find(p => p.id === Number(el.dataset.id));
@@ -5441,6 +5446,51 @@ async function renderTripDetail() {
   });
 }
 
+// Add several people at once: a few blank name rows plus a button to add more.
+function openAddPeople(tripId, onSaved) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="sheet" style="max-height:92vh">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">Add people</span><button class="sheet-close" id="ap-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(92vh - 60px)">
+        <label class="form-label">Names</label>
+        <div id="ap-rows">
+          <input class="form-input ap-name" type="text" placeholder="Name" maxlength="80" style="margin-bottom:8px">
+          <input class="form-input ap-name" type="text" placeholder="Name" maxlength="80" style="margin-bottom:8px">
+        </div>
+        <button class="btn btn-full" id="ap-add-row" style="border:1px dashed var(--border);background:none;color:var(--blue);margin-bottom:14px">＋ Add another</button>
+        <button class="btn btn-primary btn-full" id="ap-save" style="margin-bottom:20px">Save</button>
+      </div>
+    </div>`;
+  const rowsWrap = overlay.querySelector('#ap-rows');
+  overlay.querySelector('#ap-close').onclick = () => overlay.remove();
+  overlay.querySelector('#ap-add-row').onclick = () => {
+    const inp = document.createElement('input');
+    inp.className = 'form-input ap-name';
+    inp.type = 'text';
+    inp.placeholder = 'Name';
+    inp.maxLength = 80;
+    inp.style.marginBottom = '8px';
+    rowsWrap.appendChild(inp);
+    inp.focus();
+  };
+  overlay.querySelector('#ap-save').onclick = async () => {
+    const names = [...overlay.querySelectorAll('.ap-name')].map(i => i.value.trim()).filter(Boolean);
+    if (!names.length) { showToast('Enter at least one name'); return; }
+    for (const name of names) {
+      const id = await db.tripPeople.add({ tripId, name });
+      queueWrite('tripPeople', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast(names.length === 1 ? 'Person added' : `${names.length} people added`);
+    onSaved?.();
+  };
+}
+
 function openTripPersonEditor(tripId, existing, onSaved) {
   let name = existing?.name ?? '';
   const overlay = document.createElement('div');
@@ -5454,7 +5504,7 @@ function openTripPersonEditor(tripId, existing, onSaved) {
       <div class="sheet-body" style="padding:16px">
         <div class="form-group">
           <label class="form-label">Name</label>
-          <input class="form-input" type="text" id="tp-name" value="${(name || '').replace(/"/g, '&quot;')}" placeholder="e.g. William" maxlength="80">
+          <input class="form-input" type="text" id="tp-name" value="${(name || '').replace(/"/g, '&quot;')}" placeholder="Name" maxlength="80">
         </div>
         ${existing ? `<button class="btn btn-danger btn-full" id="tp-del" style="margin-bottom:8px">Remove person</button>` : ''}
         <button class="btn btn-primary btn-full" id="tp-save">Save</button>
@@ -6990,7 +7040,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Sep 2026 at 15:18 BST (v72)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Sep 2026 at 15:30 BST (v73)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
