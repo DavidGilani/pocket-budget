@@ -2085,6 +2085,47 @@ const TAX_TOOLS_FROM_YEAR = 2025;
 const taxInterestKey = ty => `taxInterest_${ty}`;
 const taxGiftAidKey = ty => `taxGiftAid_${ty}`;
 
+// ── Provisional Self Assessment tax estimate ──────────────────────────────────
+// Rough estimate of the EXTRA income tax owed via self-assessment on top of PAYE.
+// Fixed assumptions (confirmed by the user): ~£70k salary → higher-rate taxpayer,
+// no student loan, no personal (relief-at-source) pension, standard allowances,
+// England/Wales/NI rates. England bands are frozen 2025/26–2027/28 so the same
+// figures apply to every supported year.
+const TAX_ASSUMED_SALARY = 70000;
+const TAX_PSA_HIGHER = 500;       // Personal Savings Allowance, higher-rate band
+const TAX_HIGHER_THRESHOLD = 50270;
+const TAX_TAPER_START = 100000;   // personal allowance starts tapering (→ 60% marginal)
+const TAX_ADDL_THRESHOLD = 125140;
+
+// Tax on `slice` of income stacked immediately above `base`, walking the bands.
+// The £100k–£125,140 zone is charged at an effective 60% (PA taper) and anything
+// above £125,140 at the 45% additional rate.
+function bandedMarginalTax(base, slice) {
+  let pos = base, remaining = Math.max(0, slice), tax = 0;
+  while (remaining > 0.005) {
+    let rate, boundary;
+    if (pos < TAX_HIGHER_THRESHOLD) { rate = 0.20; boundary = TAX_HIGHER_THRESHOLD; }
+    else if (pos < TAX_TAPER_START) { rate = 0.40; boundary = TAX_TAPER_START; }
+    else if (pos < TAX_ADDL_THRESHOLD) { rate = 0.60; boundary = TAX_ADDL_THRESHOLD; }
+    else { rate = 0.45; boundary = Infinity; }
+    const take = Math.min(remaining, boundary - pos);
+    tax += take * rate;
+    pos += take; remaining -= take;
+  }
+  return tax;
+}
+
+function estimateSelfAssessmentTax(extraIncome, taxableInterest, cashGiftAided) {
+  const extra = Math.max(0, extraIncome || 0);
+  const intOverPsa = Math.max(0, (taxableInterest || 0) - TAX_PSA_HIGHER);
+  const extraTax = bandedMarginalTax(TAX_ASSUMED_SALARY, extra);
+  const interestTax = bandedMarginalTax(TAX_ASSUMED_SALARY + extra, intOverPsa);
+  // Gift Aid higher-rate relief = (40%−20%) × grossed-up donation = 25% of cash.
+  const giftAidRelief = 0.20 * ((cashGiftAided || 0) / 0.8);
+  const total = Math.max(0, extraTax + interestTax - giftAidRelief);
+  return { total, extraTax, interestTax, giftAidRelief };
+}
+
 // Every charity donation attributable to a tax year: the regular monthly
 // commitments (pro-rated to the months overlapping the year) plus any one-off
 // transactions / distributions filed under the "Charity / gifts" category.
@@ -2247,6 +2288,8 @@ async function renderTaxReturns() {
     const interestTotal = interest ? (Number(interest.total) || 0) : 0;
     const giftAidTotal = giftAid ? (Number(giftAid.total) || 0) : 0;
     const taxableTotal = incomeTotal + interestTotal;
+    const est = toolsAvailable ? estimateSelfAssessmentTax(incomeTotal, interestTotal, giftAidTotal) : null;
+    const hasEstInputs = incomeTotal > 0 || interestTotal > 0 || giftAidTotal > 0;
 
     const rows = list.map(e => `
       <div class="tax-entry-row" data-id="${e.id}" data-kind="${e.kind}" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer">
@@ -2291,6 +2334,19 @@ async function renderTaxReturns() {
             <div style="border-top:1px dashed var(--border);margin:4px 0"></div>
             ${giftAidRow}
           </div>
+          ${est && hasEstInputs ? `
+          <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600">Est. extra tax to pay</span>
+              <span style="font-size:18px;font-weight:800">${fmt(est.total)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-2);line-height:1.7;padding-top:6px">
+              Tax on extra income: ${fmt(est.extraTax)}${interestTotal > 0 ? `<br>Tax on interest (over ${fmt(TAX_PSA_HIGHER)}): ${fmt(est.interestTax)}` : ''}${giftAidTotal > 0 ? `<br>Less Gift Aid relief: −${fmt(est.giftAidRelief)}` : ''}
+            </div>
+            <div style="font-size:10px;color:var(--text-2);line-height:1.6;padding-top:6px;font-style:italic">
+              Provisional estimate only — assumes ~${fmt(TAX_ASSUMED_SALARY)} salary (higher rate), no student loan, standard allowances. Not tax advice.
+            </div>
+          </div>` : ''}
           <div style="font-size:11px;color:var(--text-2);padding-top:8px;line-height:1.5">
             Online return &amp; payment due ${niceDate(online)}${savedNote ? `<br>${savedNote}` : ''}
             ${isCurrent ? '<br>This year is still in progress — figures update as you add income and donations.' : ''}
@@ -7040,7 +7096,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Sep 2026 at 15:30 BST (v73)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Sep 2026 at 15:37 BST (v74)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
