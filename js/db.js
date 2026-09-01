@@ -63,6 +63,15 @@ db.version(7).stores({
   friendLoans: '++id, date, isPaid, person',
 });
 
+// Trip splitter: split shared costs on a group trip. A `trip` has a set of
+// `tripPeople` and a list of `tripSpends` (amount, who paid, how it's split).
+// Balances and settlement transfers are computed as running totals.
+db.version(8).stores({
+  trips:      '++id, createdAt',
+  tripPeople: '++id, tripId',
+  tripSpends: '++id, tripId',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },

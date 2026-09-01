@@ -104,6 +104,8 @@ async function renderView(view) {
       case 'bankGilulu':   await renderBankGilulu(); break;
       case 'householdBills': await renderHouseholdBills(); break;
       case 'moneyFriendOwe': await renderMoneyFriendOwe(); break;
+      case 'groupTrips':   await renderGroupTrips(); break;
+      case 'tripDetail':   await renderTripDetail(); break;
       case 'yearlyTrends': await renderYearlyTrends(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
@@ -5121,6 +5123,482 @@ function openLoanEditor(existing, onSaved) {
   });
 }
 
+// ── Trip splitter: split shared costs on a group trip ─────────────────────────
+// Log spends (amount, who paid, split across all or some people); the app shows
+// running totals of who paid what, each person's fair share, and the minimal set
+// of transfers to settle up. Nothing is ever "completed" — it's all live.
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  // Fallback for older mobile browsers without the async clipboard API.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+// Compute paid / fair-share / balance per person and the settling transfers.
+// Works entirely in integer pence so totals reconcile exactly (no float dust).
+function computeTripSummary(people, spends) {
+  const ids = people.map(p => p.id);
+  const paid = {}, shareFloat = {};
+  ids.forEach(id => { paid[id] = 0; shareFloat[id] = 0; });
+  let totalPence = 0;
+  let allSplitAll = spends.length > 0;
+
+  for (const s of spends) {
+    const cents = Math.round((Number(s.amount) || 0) * 100);
+    if (cents <= 0) continue;
+    if (paid[s.payerId] == null) continue; // payer no longer exists — skip
+    paid[s.payerId] += cents;
+    totalPence += cents;
+    let splitList = s.splitAll ? ids.slice() : (s.splitPersonIds || []).filter(id => paid[id] != null);
+    if (!splitList.length) splitList = ids.slice(); // fallback: everyone
+    if (!s.splitAll) allSplitAll = false;
+    // Accrue each person's exact fractional share; rounding happens once, at the
+    // aggregate level, so an equal split lands on exactly total/n per person.
+    const perHead = cents / splitList.length;
+    splitList.forEach(id => { shareFloat[id] += perHead; });
+  }
+
+  // Round aggregate shares to pence with the largest-remainder method, so the
+  // rounded shares still sum to the exact total (no bias toward any person).
+  const share = {};
+  ids.forEach(id => { share[id] = Math.floor(shareFloat[id]); });
+  let need = totalPence - ids.reduce((s, id) => s + share[id], 0);
+  ids.map(id => ({ id, frac: shareFloat[id] - Math.floor(shareFloat[id]) }))
+     .sort((a, b) => b.frac - a.frac)
+     .forEach((x, i) => { if (i < need) share[x.id] += 1; });
+
+  const balance = {};
+  ids.forEach(id => { balance[id] = paid[id] - share[id]; });
+
+  // Greedy minimal settlement: largest debtor pays largest creditor, repeat.
+  const cr = ids.filter(id => balance[id] > 0).map(id => ({ id, amt: balance[id] })).sort((a, b) => b.amt - a.amt);
+  const de = ids.filter(id => balance[id] < 0).map(id => ({ id, amt: -balance[id] })).sort((a, b) => b.amt - a.amt);
+  const transfers = [];
+  let ci = 0, di = 0;
+  while (ci < cr.length && di < de.length) {
+    const pay = Math.min(cr[ci].amt, de[di].amt);
+    if (pay > 0) transfers.push({ fromId: de[di].id, toId: cr[ci].id, pence: pay });
+    cr[ci].amt -= pay; de[di].amt -= pay;
+    if (cr[ci].amt === 0) ci++;
+    if (de[di].amt === 0) di++;
+  }
+
+  return { paid, share, balance, totalPence, transfers, allSplitAll };
+}
+
+const penceFmt = p => fmt(p / 100);
+
+function tripSummaryText(trip, people, spends) {
+  const nameOf = id => people.find(p => p.id === id)?.name || 'Someone';
+  const { paid, share, balance, totalPence, transfers, allSplitAll } = computeTripSummary(people, spends);
+  const lines = [];
+  lines.push(trip.name || 'Trip');
+  lines.push('');
+  lines.push('Costs paid');
+  people.forEach(p => lines.push(`• ${p.name}: ${penceFmt(paid[p.id] || 0)}`));
+  lines.push('');
+  lines.push(`Total: ${penceFmt(totalPence)}`);
+  if (allSplitAll && people.length > 0) lines.push(`Split ${people.length} ways: ${penceFmt(Math.round(totalPence / people.length))} each`);
+  lines.push('');
+  lines.push('Who owes / is owed');
+  people.forEach(p => {
+    const b = balance[p.id] || 0;
+    if (b > 0) lines.push(`• ${p.name}: owed ${penceFmt(b)}`);
+    else if (b < 0) lines.push(`• ${p.name}: owes ${penceFmt(-b)}`);
+    else lines.push(`• ${p.name}: settled`);
+  });
+  lines.push('');
+  lines.push('Payments to settle');
+  if (transfers.length === 0) lines.push('• All settled — no payments needed');
+  else transfers.forEach(t => lines.push(`• ${nameOf(t.fromId)} → ${nameOf(t.toId)}: ${penceFmt(t.pence)}`));
+  return lines.join('\n');
+}
+
+async function renderGroupTrips() {
+  const trips = (await db.trips.toArray()).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+
+  // Pull spend totals + people counts for each trip in the list.
+  const meta = {};
+  for (const t of trips) {
+    const [ppl, sp] = await Promise.all([
+      db.tripPeople.where('tripId').equals(t.id).count(),
+      db.tripSpends.where('tripId').equals(t.id).toArray(),
+    ]);
+    meta[t.id] = { people: ppl, total: sp.reduce((s, x) => s + (Number(x.amount) || 0), 0) };
+  }
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen" id="trips-screen">
+      <div class="screen-header">
+        ${back}
+        <span class="screen-title">Trip splitter</span>
+        <button class="icon-btn" id="trip-add-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+      </div>
+      <div style="padding:12px 16px 4px;font-size:13px;color:var(--text-2);line-height:1.5">Split shared costs on a group trip. Balances update live — no need to mark anything finished.</div>
+      ${trips.length === 0
+        ? `<div class="empty-state"><div class="empty-icon">🧳</div><div class="empty-title">No trips yet</div><div class="empty-text">Create a trip, add who's involved, then log each spend to see who owes what.</div><button class="btn btn-primary" id="trip-empty-add">New trip</button></div>`
+        : `<div class="settings-card" style="margin:8px 12px">${trips.map(t => `
+            <div class="trip-row" data-id="${t.id}" style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer">
+              <span style="font-size:20px">🧳</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.name || 'Trip'}</div>
+                <div style="font-size:12px;color:var(--text-2)">${t.createdAt ? fmtDate(t.createdAt.slice(0, 10)) : ''} · ${meta[t.id].people} ${meta[t.id].people === 1 ? 'person' : 'people'} · ${fmt(meta[t.id].total)} total</div>
+              </div>
+              <span class="settings-row-chevron">›</span>
+            </div>`).join('')}</div>`}
+      <div style="padding:14px 12px 80px">
+        <button class="btn btn-primary btn-full" id="trip-add">＋ New trip</button>
+      </div>
+    </div>`;
+
+  const screen = viewContainer.querySelector('#trips-screen');
+  const openNew = () => openTripEditor(null, id => { if (id) navigate('tripDetail', { currentTripId: id }); });
+  screen.querySelector('#trip-add-btn').onclick = openNew;
+  screen.querySelector('#trip-add').onclick = openNew;
+  screen.querySelector('#trip-empty-add')?.addEventListener('click', openNew);
+  delegate(screen, 'click', '.trip-row', (e, el) => navigate('tripDetail', { currentTripId: Number(el.dataset.id) }));
+}
+
+function openTripEditor(existing, onSaved) {
+  let name = existing?.name ?? '';
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">${existing ? 'Rename trip' : 'New trip'}</span><button class="sheet-close" id="tr-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Trip name</label>
+          <input class="form-input" type="text" id="tr-name" value="${(name || '').replace(/"/g, '&quot;')}" placeholder="e.g. Lake District weekend" maxlength="120">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="tr-del" style="margin-bottom:8px">Delete trip</button>` : ''}
+        <button class="btn btn-primary btn-full" id="tr-save">${existing ? 'Save' : 'Create trip'}</button>
+      </div>
+    </div>`;
+  overlay.querySelector('#tr-close').onclick = () => overlay.remove();
+  overlay.querySelector('#tr-name').oninput = e => { name = e.target.value; };
+  overlay.querySelector('#tr-save').onclick = async () => {
+    if (!name.trim()) { showToast('Enter a trip name'); return; }
+    if (existing) {
+      await db.trips.update(existing.id, { name: name.trim() });
+      queueWrite('trips', existing.id).catch(() => {});
+      overlay.remove();
+      showToast('Trip renamed');
+      onSaved?.(existing.id);
+    } else {
+      const id = await db.trips.add({ name: name.trim(), createdAt: new Date().toISOString() });
+      queueWrite('trips', id).catch(() => {});
+      overlay.remove();
+      showToast('Trip created');
+      onSaved?.(id);
+    }
+  };
+  overlay.querySelector('#tr-del')?.addEventListener('click', async () => {
+    if (!confirm('Delete this trip and all its people and spends?')) return;
+    const [ppl, sp] = await Promise.all([
+      db.tripPeople.where('tripId').equals(existing.id).toArray(),
+      db.tripSpends.where('tripId').equals(existing.id).toArray(),
+    ]);
+    for (const p of ppl) { await db.tripPeople.delete(p.id); queueDelete('tripPeople', p.id).catch(() => {}); }
+    for (const s of sp) { await db.tripSpends.delete(s.id); queueDelete('tripSpends', s.id).catch(() => {}); }
+    await db.trips.delete(existing.id);
+    queueDelete('trips', existing.id).catch(() => {});
+    overlay.remove();
+    showToast('Trip deleted');
+    navigate('groupTrips', {}, true);
+  });
+}
+
+async function renderTripDetail() {
+  const tripId = state.currentTripId;
+  const trip = tripId ? await db.trips.get(tripId) : null;
+  if (!trip) { navigate('groupTrips', {}, true); return; }
+  const people = await db.tripPeople.where('tripId').equals(tripId).toArray();
+  const spends = (await db.tripSpends.where('tripId').equals(tripId).sortBy('id')).reverse(); // newest first
+  const nameOf = id => people.find(p => p.id === id)?.name || '—';
+  const reRender = () => renderTripDetail();
+
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+  const sum = computeTripSummary(people, spends);
+
+  const peopleHtml = people.length === 0
+    ? `<div style="padding:8px 16px;color:var(--text-2);font-size:14px">No one added yet.</div>`
+    : `<div class="settings-card" style="margin:4px 12px 0;padding:0">${people.map(p => `
+        <div class="trip-person-row" data-id="${p.id}" style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer">
+          <span style="font-size:16px">🙂</span>
+          <div style="flex:1;font-size:15px;font-weight:500">${p.name}</div>
+          <span style="font-size:13px;color:var(--text-2)">paid ${penceFmt(sum.paid[p.id] || 0)}</span>
+          <span class="settings-row-chevron">›</span>
+        </div>`).join('')}</div>`;
+
+  const spendsHtml = spends.length === 0
+    ? `<div style="padding:8px 16px;color:var(--text-2);font-size:14px">No spends logged yet.</div>`
+    : `<div class="settings-card" style="margin:4px 12px 0;padding:0">${spends.map(s => {
+        const splitLabel = s.splitAll ? 'everyone' : `${(s.splitPersonIds || []).length} people`;
+        return `
+        <div class="trip-spend-row" data-id="${s.id}" style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.description || 'Spend'}</div>
+            <div style="font-size:12px;color:var(--text-2)">${nameOf(s.payerId)} paid · split ${splitLabel}${s.date ? ` · ${fmtDate(s.date)}` : ''}</div>
+          </div>
+          <div style="font-size:15px;font-weight:700;white-space:nowrap">${fmt(Math.abs(Number(s.amount) || 0))}</div>
+        </div>`;
+      }).join('')}</div>`;
+
+  // Settlement / summary block
+  let summaryHtml = '';
+  if (people.length > 0 && spends.length > 0) {
+    const owesHtml = people.map(p => {
+      const b = sum.balance[p.id] || 0;
+      const label = b > 0 ? `owed ${penceFmt(b)}` : b < 0 ? `owes ${penceFmt(-b)}` : 'settled';
+      const colour = b > 0 ? '#43a047' : b < 0 ? 'var(--coral)' : 'var(--text-2)';
+      return `<div style="display:flex;justify-content:space-between;padding:5px 0"><span style="font-size:14px">${p.name}</span><span style="font-size:14px;font-weight:600;color:${colour}">${label}</span></div>`;
+    }).join('');
+    const transfersHtml = sum.transfers.length === 0
+      ? `<div style="font-size:14px;color:var(--text-2);padding:4px 0">All settled — no payments needed 🎉</div>`
+      : sum.transfers.map(t => `<div style="display:flex;justify-content:space-between;padding:5px 0"><span style="font-size:14px">${nameOf(t.fromId)} → ${nameOf(t.toId)}</span><span style="font-size:14px;font-weight:700">${penceFmt(t.pence)}</span></div>`).join('');
+    summaryHtml = `
+      <div style="padding:16px 12px 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Summary</div>
+      <div class="settings-card" style="margin:4px 12px 0;padding:14px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span style="font-size:13px;color:var(--text-2)">Total spent</span>
+          <span style="font-size:18px;font-weight:800">${penceFmt(sum.totalPence)}</span>
+        </div>
+        ${sum.allSplitAll ? `<div style="font-size:13px;color:var(--text-2);margin-bottom:8px">Split ${people.length} ways · <strong>${penceFmt(Math.round(sum.totalPence / people.length))} each</strong></div>` : `<div style="font-size:13px;color:var(--text-2);margin-bottom:8px">Some spends are split between a subset of people, so each person's fair share differs.</div>`}
+        <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:2px">
+          <div style="font-size:12px;font-weight:700;color:var(--text-2);margin-bottom:2px">Who owes / is owed</div>
+          ${owesHtml}
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text-2);margin-bottom:2px">Payments to settle</div>
+          ${transfersHtml}
+        </div>
+        <button class="btn btn-primary btn-full" id="trip-copy" style="margin-top:14px">📋 Copy summary</button>
+      </div>`;
+  }
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen" id="trip-detail-screen">
+      <div class="screen-header">
+        ${back}
+        <span class="screen-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${trip.name || 'Trip'}</span>
+        <button class="icon-btn" id="trip-rename-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 14px 4px">
+        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">People</span>
+        <button id="trip-add-person" style="font-size:13px;font-weight:600;color:var(--blue);background:none;border:none;cursor:pointer">＋ Add person</button>
+      </div>
+      ${peopleHtml}
+
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 14px 4px">
+        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Spends</span>
+      </div>
+      ${spendsHtml}
+      <div style="padding:12px 12px 4px">
+        <button class="btn btn-primary btn-full" id="trip-add-spend"${people.length === 0 ? ' disabled style="opacity:.5"' : ''}>＋ Add spend</button>
+        ${people.length === 0 ? `<div style="font-size:12px;color:var(--text-2);text-align:center;margin-top:6px">Add at least one person first.</div>` : ''}
+      </div>
+
+      ${summaryHtml}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const screen = viewContainer.querySelector('#trip-detail-screen');
+  screen.querySelector('#trip-rename-btn').onclick = () => openTripEditor(trip, () => reRender());
+  screen.querySelector('#trip-add-person').onclick = () => openTripPersonEditor(tripId, null, reRender);
+  screen.querySelector('#trip-add-spend')?.addEventListener('click', () => { if (people.length) openSpendEditor(tripId, null, people, reRender); });
+  delegate(screen, 'click', '.trip-person-row', (e, el) => {
+    const person = people.find(p => p.id === Number(el.dataset.id));
+    if (person) openTripPersonEditor(tripId, person, reRender);
+  });
+  delegate(screen, 'click', '.trip-spend-row', (e, el) => {
+    const spend = spends.find(s => s.id === Number(el.dataset.id));
+    if (spend) openSpendEditor(tripId, spend, people, reRender);
+  });
+  screen.querySelector('#trip-copy')?.addEventListener('click', async () => {
+    const ok = await copyToClipboard(tripSummaryText(trip, people, spends));
+    showToast(ok ? 'Summary copied' : 'Could not copy');
+  });
+}
+
+function openTripPersonEditor(tripId, existing, onSaved) {
+  let name = existing?.name ?? '';
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">${existing ? 'Edit person' : 'Add person'}</span><button class="sheet-close" id="tp-close">✕</button></div>
+      <div class="sheet-body" style="padding:16px">
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input class="form-input" type="text" id="tp-name" value="${(name || '').replace(/"/g, '&quot;')}" placeholder="e.g. William" maxlength="80">
+        </div>
+        ${existing ? `<button class="btn btn-danger btn-full" id="tp-del" style="margin-bottom:8px">Remove person</button>` : ''}
+        <button class="btn btn-primary btn-full" id="tp-save">Save</button>
+      </div>
+    </div>`;
+  overlay.querySelector('#tp-close').onclick = () => overlay.remove();
+  overlay.querySelector('#tp-name').oninput = e => { name = e.target.value; };
+  overlay.querySelector('#tp-save').onclick = async () => {
+    if (!name.trim()) { showToast('Enter a name'); return; }
+    if (existing) {
+      await db.tripPeople.update(existing.id, { name: name.trim() });
+      queueWrite('tripPeople', existing.id).catch(() => {});
+    } else {
+      const id = await db.tripPeople.add({ tripId, name: name.trim() });
+      queueWrite('tripPeople', id).catch(() => {});
+    }
+    overlay.remove();
+    onSaved?.();
+  };
+  overlay.querySelector('#tp-del')?.addEventListener('click', async () => {
+    const paidSpends = await db.tripSpends.where('tripId').equals(tripId).toArray();
+    if (paidSpends.some(s => s.payerId === existing.id)) {
+      showToast('This person paid for spends — edit or delete those first');
+      return;
+    }
+    if (!confirm('Remove this person?')) return;
+    // Drop them from any split lists so shares recompute cleanly.
+    for (const s of paidSpends) {
+      if (!s.splitAll && (s.splitPersonIds || []).includes(existing.id)) {
+        await db.tripSpends.update(s.id, { splitPersonIds: s.splitPersonIds.filter(id => id !== existing.id) });
+        queueWrite('tripSpends', s.id).catch(() => {});
+      }
+    }
+    await db.tripPeople.delete(existing.id);
+    queueDelete('tripPeople', existing.id).catch(() => {});
+    overlay.remove();
+    onSaved?.();
+  });
+}
+
+function openSpendEditor(tripId, existing, people, onSaved) {
+  let amount = Math.abs(Number(existing?.amount) || 0);
+  let desc = existing?.description ?? '';
+  let payerId = existing?.payerId ?? (people[0]?.id ?? null);
+  let date = existing?.date ?? today();
+  let splitAll = existing ? !!existing.splitAll : true;
+  let splitIds = existing && !existing.splitAll ? [...(existing.splitPersonIds || [])] : people.map(p => p.id);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const chip = (label, active, attrs) => `<button ${attrs} style="font-size:13px;padding:6px 12px;border-radius:20px;border:1.5px solid ${active ? 'var(--blue)' : 'var(--border)'};background:${active ? 'var(--blue)' : 'transparent'};color:${active ? '#fff' : 'var(--text)'};cursor:pointer;margin:0 6px 6px 0">${label}</button>`;
+
+  function build() {
+    overlay.innerHTML = `
+      <div class="sheet" style="max-height:92vh">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header"><span class="sheet-title">${existing ? 'Edit spend' : 'Add spend'}</span><button class="sheet-close" id="sp-close">✕</button></div>
+        <div class="sheet-body" style="padding:16px;overflow-y:auto;max-height:calc(92vh - 60px)">
+          <div class="form-group" style="cursor:pointer" id="sp-amount-row">
+            <label class="form-label">Amount</label>
+            <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+              <span id="sp-amount-disp" style="font-size:16px;font-weight:600">${amount > 0 ? fmt(amount) : 'Tap to enter'}</span><span style="color:var(--text-2)">›</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">What it was for</label>
+            <input class="form-input" type="text" id="sp-desc" value="${(desc || '').replace(/"/g, '&quot;')}" placeholder="e.g. Dinner, taxi, tickets" maxlength="120">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Paid by</label>
+            <div id="sp-payer">${people.map(p => chip(p.name, p.id === payerId, `class="sp-payer-chip" data-id="${p.id}"`)).join('')}</div>
+          </div>
+          <div class="form-group" style="cursor:pointer" id="sp-date-row">
+            <label class="form-label">Date</label>
+            <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+              <span id="sp-date-disp">${fmtDate(date)}</span><span style="color:var(--text-2)">›</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <label class="form-label" style="margin:0">Split across everyone</label>
+              <input type="checkbox" id="sp-split-all" ${splitAll ? 'checked' : ''} style="width:20px;height:20px;accent-color:var(--blue)">
+            </div>
+            <div id="sp-split-list" style="margin-top:10px;display:${splitAll ? 'none' : 'block'}">
+              ${people.map(p => chip(p.name, splitIds.includes(p.id), `class="sp-split-chip" data-id="${p.id}"`)).join('')}
+            </div>
+          </div>
+          ${existing ? `<button class="btn btn-danger btn-full" id="sp-del" style="margin-bottom:8px">Delete spend</button>` : ''}
+          <button class="btn btn-primary btn-full" id="sp-save" style="margin-bottom:20px">Save</button>
+        </div>
+      </div>`;
+
+    overlay.querySelector('#sp-close').onclick = () => overlay.remove();
+    overlay.querySelector('#sp-desc').oninput = e => { desc = e.target.value; };
+    overlay.querySelector('#sp-amount-row').onclick = () => openAmountPad('Amount', amount, v => { amount = Math.abs(v); overlay.querySelector('#sp-amount-disp').textContent = amount > 0 ? fmt(amount) : 'Tap to enter'; }, { noNegative: true });
+    overlay.querySelector('#sp-date-row').onclick = () => openDatePicker(date, today(), d => { date = d; overlay.querySelector('#sp-date-disp').textContent = fmtDate(d); });
+    overlay.querySelectorAll('.sp-payer-chip').forEach(b => b.addEventListener('click', () => { payerId = Number(b.dataset.id); build(); }));
+    overlay.querySelector('#sp-split-all').onchange = e => {
+      splitAll = e.target.checked;
+      if (splitAll) splitIds = people.map(p => p.id);
+      build();
+    };
+    overlay.querySelectorAll('.sp-split-chip').forEach(b => b.addEventListener('click', () => {
+      const id = Number(b.dataset.id);
+      if (splitIds.includes(id)) splitIds = splitIds.filter(x => x !== id);
+      else splitIds.push(id);
+      build();
+    }));
+    overlay.querySelector('#sp-save').onclick = doSave;
+    overlay.querySelector('#sp-del')?.addEventListener('click', async () => {
+      if (!confirm('Delete this spend?')) return;
+      await db.tripSpends.delete(existing.id);
+      queueDelete('tripSpends', existing.id).catch(() => {});
+      overlay.remove();
+      onSaved?.();
+    });
+  }
+
+  async function doSave() {
+    if ((amount || 0) <= 0) { showToast('Enter an amount'); return; }
+    if (payerId == null) { showToast('Choose who paid'); return; }
+    if (!splitAll && splitIds.length === 0) { showToast('Pick who to split between (or split across everyone)'); return; }
+    const rec = {
+      tripId, amount: amount || 0, description: desc.trim(), payerId, date,
+      splitAll, splitPersonIds: splitAll ? [] : [...splitIds],
+    };
+    if (existing) {
+      await db.tripSpends.update(existing.id, rec);
+      queueWrite('tripSpends', existing.id).catch(() => {});
+    } else {
+      const id = await db.tripSpends.add(rec);
+      queueWrite('tripSpends', id).catch(() => {});
+    }
+    overlay.remove();
+    showToast('Spend saved');
+    onSaved?.();
+  }
+
+  build();
+}
+
 // ── Financial goals: pension maximising ───────────────────────────────────────
 // Logs APC (Additional Pension Contribution) purchases — each buys a chunk of
 // extra *annual* pension into the LGPS pot. There's a lifetime cap on how much
@@ -6482,6 +6960,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-distributions"><span class="settings-row-icon">📅</span><span class="settings-row-label">Big expenses</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household bills (Rich)</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-money-owed"><span class="settings-row-icon">💸</span><span class="settings-row-label">Money friends owe</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-trip-split"><span class="settings-row-icon">🧳</span><span class="settings-row-label">Trip splitter</span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -6511,7 +6990,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 25 Aug 2026 at 07:54 BST (v71)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Sep 2026 at 15:18 BST (v72)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -6521,6 +7000,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-distributions').onclick = () => navigate('distributions');
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-money-owed').onclick = () => navigate('moneyFriendOwe');
+  viewContainer.querySelector('#nav-trip-split').onclick = () => navigate('groupTrips');
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
   viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
@@ -6725,6 +7205,9 @@ async function handleImportFile(file) {
       if (data.friendHoldings?.length) { await db.friendHoldings.bulkPut(data.friendHoldings); stats.friendHoldings = data.friendHoldings.length; }
       if (data.friendTransactions?.length) { await db.friendTransactions.bulkPut(data.friendTransactions); stats.friendTransactions = data.friendTransactions.length; }
       if (data.friendLoans?.length) { await db.friendLoans.bulkPut(data.friendLoans); stats.friendLoans = data.friendLoans.length; }
+      if (data.trips?.length) { await db.trips.bulkPut(data.trips); stats.trips = data.trips.length; }
+      if (data.tripPeople?.length) { await db.tripPeople.bulkPut(data.tripPeople); stats.tripPeople = data.tripPeople.length; }
+      if (data.tripSpends?.length) { await db.tripSpends.bulkPut(data.tripSpends); stats.tripSpends = data.tripSpends.length; }
     });
     progFill.style.width = '100%'; progLabel.textContent = 'Complete!';
     resultDiv.style.display = 'block';
@@ -6744,12 +7227,13 @@ async function handleImportFile(file) {
 
 async function exportData() {
   showToast('Preparing export...');
-  const [transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans] = await Promise.all([
+  const [transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans, trips, tripPeople, tripSpends] = await Promise.all([
     db.transactions.toArray(), db.categories.toArray(), db.recurringExpenses.toArray(), db.recurringIncome.toArray(),
     db.savingsTargets.toArray(), db.distributions.toArray(), db.accounts.toArray(),
     db.accountSnapshots.toArray(), db.friendHoldings.toArray(), db.friendTransactions.toArray(), db.friendLoans.toArray(),
+    db.trips.toArray(), db.tripPeople.toArray(), db.tripSpends.toArray(),
   ]);
-  const data = { transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans, exportedAt: new Date().toISOString() };
+  const data = { transactions, categories, recurringExpenses, recurringIncome, savingsTargets, distributions, accounts, accountSnapshots, friendHoldings, friendTransactions, friendLoans, trips, tripPeople, tripSpends, exportedAt: new Date().toISOString() };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `pocket-ledger-backup-${today()}.json`; a.click();
@@ -6938,7 +7422,7 @@ init().catch(console.error);
     'breakdown', 'recurring', 'extraIncomes', 'distributions', 'netWealth',
     'mortgageFree', 'helpToBuy', 'investments', 'charity', 'pension',
     'bankGilulu', 'householdBills', 'accounts', 'yearlyTrends', 'import',
-    'taxReturns', 'moneyFriendOwe',
+    'taxReturns', 'moneyFriendOwe', 'groupTrips', 'tripDetail',
   ]);
   let startX = 0, startY = 0, tracking = false;
   viewContainer.addEventListener('touchstart', e => {
