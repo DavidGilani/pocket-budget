@@ -56,7 +56,12 @@ html, body {
   display: flex;
   background: var(--card);
   border-top: 1px solid var(--border);
-  height: var(--nav-height);
+  /* box-sizing is border-box globally, so the safe-area padding must be ADDED to
+     the height — otherwise it eats into the 64px and squashes the icons to the
+     top on devices with a home indicator (iPhone 13) while looking fine on ones
+     without (iPhone SE). Adding it keeps the icon row a full nav-height tall on
+     every device, with the home-indicator space reserved below. */
+  height: calc(var(--nav-height) + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   flex-shrink: 0;
   z-index: 100;
