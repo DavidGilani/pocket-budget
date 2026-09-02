@@ -1,6 +1,6 @@
 // Pocket Ledger Service Worker
 
-const CACHE = 'pocket-ledger-v76';
+const CACHE = 'pocket-ledger-v77';
 const APP_SHELL = [
   './',
   './index.html',
@@ -45,11 +45,21 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
+// Cache a successful response and hand it back.
+function cachePut(request, response) {
+  if (response && response.ok) {
+    const clone = response.clone();
+    caches.open(CACHE).then(cache => cache.put(request, clone));
+  }
+  return response;
+}
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
   if (event.request.method !== 'GET') return;
 
+  // Navigations: network-first, fall back to the cached shell when offline.
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request).catch(() => caches.match('./index.html'))
@@ -57,16 +67,27 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  const sameOrigin = url.origin === self.location.origin;
+
+  if (sameOrigin) {
+    // App code/assets (index.html, app.js, css, …): NETWORK-FIRST so an online
+    // device always runs the latest version, with the cache as an offline
+    // fallback. This is what stops installed iOS PWAs getting stuck on an old
+    // cached build — cache-first meant they kept serving stale JS until the
+    // service worker itself finally updated, which iOS does only grudgingly.
+    event.respondWith(
+      fetch(event.request)
+        .then(response => cachePut(event.request, response))
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // Cross-origin (CDN libraries, version-pinned): cache-first is fine and fast.
   event.respondWith(
     caches.match(event.request).then(cached => {
       if (cached) return cached;
-      return fetch(event.request).then(response => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE).then(cache => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => cached);
+      return fetch(event.request).then(response => cachePut(event.request, response)).catch(() => cached);
     })
   );
 });
