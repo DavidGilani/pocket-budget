@@ -78,7 +78,7 @@ html, body {
   transition: color .15s;
 }
 .nav-btn.active { color: var(--blue); }
-.nav-btn svg { width: 24px; height: 24px; }
+.nav-btn svg { width: 24px; height: 24px; flex-shrink: 0; }
 
 .balance-screen {
   min-height: 100%;
