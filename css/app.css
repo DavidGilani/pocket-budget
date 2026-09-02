@@ -56,13 +56,15 @@ html, body {
   display: flex;
   background: var(--card);
   border-top: 1px solid var(--border);
-  /* box-sizing is border-box globally, so the safe-area padding must be ADDED to
-     the height — otherwise it eats into the 64px and squashes the icons to the
-     top on devices with a home indicator (iPhone 13) while looking fine on ones
-     without (iPhone SE). Adding it keeps the icon row a full nav-height tall on
-     every device, with the home-indicator space reserved below. */
-  height: calc(var(--nav-height) + var(--safe-bottom));
-  padding-bottom: var(--safe-bottom);
+  /* Compact tab bar that sits just above the home indicator, like a native one.
+     We reserve only a SMALL part of the safe-area inset as bottom padding — not
+     the whole ~34pt — so the icons sit close to the bottom edge instead of
+     floating with a big white gap beneath them (iPhone 13). On devices with no
+     home indicator (iPhone SE) the inset is 0, so the max() keeps a small pad
+     and nothing changes there. The bar sizes to its content (no fixed height),
+     giving the scroll area the rest of the screen. */
+  padding-top: 4px;
+  padding-bottom: max(6px, calc(var(--safe-bottom) - 16px));
   flex-shrink: 0;
   z-index: 100;
 }
@@ -77,7 +79,7 @@ html, body {
   background: none;
   border: none;
   cursor: pointer;
-  padding: 8px 0;
+  padding: 6px 0;
   color: var(--text-2);
   font-size: 10px;
   transition: color .15s;
