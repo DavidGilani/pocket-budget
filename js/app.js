@@ -3912,13 +3912,18 @@ function amortiseMortgage(principal, annualRate, standardMonthly, monthlyOver) {
 }
 
 async function computeMortgageProjection() {
-  const [accounts, snaps, rates, overpayments, myOverRaw, richOverRaw] = await Promise.all([
+  const [accounts, snaps, rates, overpayments, myOverRaw, richOverRaw,
+         baseDateRaw, baseMineRaw, baseRichRaw, stdSplitRichRaw] = await Promise.all([
     db.accounts.toArray(),
     db.accountSnapshots.toArray(),
     db.accountRates.toArray(),
     db.mortgageOverpayments.toArray(),
     getSetting('mortgageMyOverpayment'),
     getSetting('mortgageRichOverpayment'),
+    getSetting('mtgBaselineDate'),
+    getSetting('mtgBaselineMine'),
+    getSetting('mtgBaselineRich'),
+    getSetting('mtgStdSplitRich'),
   ]);
   const mortgage = accounts.find(a => a.type === 'mortgage' && a.isActive !== false)
                 ?? accounts.find(a => a.type === 'mortgage');
@@ -3986,12 +3991,54 @@ async function computeMortgageProjection() {
     }
   }
 
+  // ── Contribution split (fairness) ───────────────────────────────────────────
+  // Rich's share of *all* mortgage contributions — standard monthly payments plus
+  // overpayments — measured from a "banked" baseline. The baseline freezes the
+  // agreed split up to a chosen date (so the full historical payment record isn't
+  // needed); everything after it is accrued month-by-month from the standard
+  // payment (split by `mtgStdSplitRich`) plus each logged overpayment's own split.
+  const baselineDate = baseDateRaw || null;
+  const baselineMine = Number(baseMineRaw) || 0;
+  const baselineRich = Number(baseRichRaw) || 0;
+  const stdSplitRich = baseDateRaw == null ? 50 : Math.min(100, Math.max(0, Number(stdSplitRichRaw ?? 50) || 0));
+
+  // Whole months elapsed from the baseline date to today (each completed month
+  // adds one standard payment to the going-forward pot).
+  let monthsSince = 0;
+  if (baselineDate) {
+    const b = new Date(baselineDate + 'T12:00:00');
+    monthsSince = Math.max(0, (now.getFullYear() - b.getFullYear()) * 12 + (now.getMonth() - b.getMonth())
+      + (now.getDate() >= b.getDate() ? 0 : -1));
+  }
+  const fwdStdTotal = monthsSince * standardMonthly;
+  const fwdStdRich = fwdStdTotal * stdSplitRich / 100;
+  const fwdStdMine = fwdStdTotal - fwdStdRich;
+
+  // Overpayments logged strictly after the baseline (earlier ones are baked into it).
+  const overSince = baselineDate ? sortedOver.filter(o => o.date > baselineDate) : [];
+  const overSinceMine = overSince.reduce((s, o) => s + (Number(o.myAmount) || 0), 0);
+  const overSinceRich = overSince.reduce((s, o) => s + (Number(o.richAmount) || 0), 0);
+
+  const contribMine = baselineMine + fwdStdMine + overSinceMine;
+  const contribRich = baselineRich + fwdStdRich + overSinceRich;
+  const contribTotal = contribMine + contribRich;
+  const contrib = {
+    configured: baselineDate != null,
+    baselineDate, baselineMine, baselineRich, stdSplitRich,
+    monthsSince, standardMonthly, fwdStdTotal, fwdStdMine, fwdStdRich,
+    overSinceMine, overSinceRich, overSinceCount: overSince.length,
+    mine: contribMine, rich: contribRich, total: contribTotal,
+    richPct: contribTotal > 0 ? contribRich / contribTotal * 100 : 0,
+    minePct: contribTotal > 0 ? contribMine / contribTotal * 100 : 0,
+  };
+
   return {
     mortgage, annualRate, standardMonthly, myOver, richOver, assumedOver,
     anchorPrincipal, anchorDate, currentPrincipal,
     withOver, withoutOver, interestSaved,
     clearDate, clearLabel, monthsToClear,
     overpayments: sortedOver, totalMine, totalRich, totalOverpaid, actualInterestSaved, mSnaps, now, curKey,
+    contrib,
   };
 }
 
@@ -4085,6 +4132,59 @@ async function renderMortgageFree() {
       <span style="margin-left:auto;font-weight:600">${value}</span>
       ${id ? '<span class="settings-row-chevron">›</span>' : ''}
     </div>`;
+  const c = p.contrib;
+  const pctFmt = n => `${n.toFixed(1)}%`;
+  const contribCard = `
+    <div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Contribution split</div>
+    ${!c.configured ? `
+    <div class="settings-card" style="margin:4px 12px">
+      <div style="padding:14px 16px;font-size:13px;color:var(--text-2);line-height:1.5">
+        Track how much of all mortgage contributions (standard payments + overpayments) each of you has paid, to keep the equity split fair.
+        Start by <b>banking</b> the agreed position to date — enter the totals each of you has contributed up to a chosen date. Everything after that is tracked automatically.
+      </div>
+      <div class="settings-row" id="mf-set-baseline" style="cursor:pointer">
+        <span class="settings-row-label">Bank a starting position</span>
+        <span class="settings-row-chevron">›</span>
+      </div>
+    </div>` : `
+    <div class="settings-card" style="margin:4px 12px">
+      <div style="padding:14px 16px 10px;text-align:center">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em">Rich's share of contributions</div>
+        <div style="font-size:30px;font-weight:800">${pctFmt(c.richPct)}</div>
+        <div style="font-size:13px;color:var(--text-2)">You ${pctFmt(c.minePct)} · Rich ${pctFmt(c.richPct)}</div>
+      </div>
+      <div class="settings-row"><span class="settings-row-label">You contributed</span><span style="margin-left:auto;font-weight:600">${fmt(c.mine)}</span></div>
+      <div class="settings-row"><span class="settings-row-label">Rich contributed</span><span style="margin-left:auto;font-weight:600">${fmt(c.rich)}</span></div>
+      <div class="settings-row"><span class="settings-row-label" style="font-weight:600">Total contributions</span><span style="margin-left:auto;font-weight:700">${fmt(c.total)}</span></div>
+    </div>
+    <div style="padding:6px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">Breakdown</div>
+    <div class="settings-card" style="margin:4px 12px">
+      <div class="settings-row" id="mf-edit-baseline" style="cursor:pointer">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px">Banked baseline</div>
+          <div style="font-size:12px;color:var(--text-2)">As of ${fmtDate(c.baselineDate)} · you ${fmt(c.baselineMine)} · Rich ${fmt(c.baselineRich)}</div>
+        </div>
+        <span class="settings-row-chevron">›</span>
+      </div>
+      <div class="settings-row" id="mf-edit-split" style="cursor:pointer">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px">Standard payments since</div>
+          <div style="font-size:12px;color:var(--text-2)">${c.monthsSince} mo × ${fmt(c.standardMonthly)} = ${fmt(c.fwdStdTotal)} · Rich ${c.stdSplitRich}% (${fmt(c.fwdStdRich)})</div>
+        </div>
+        <span class="settings-row-chevron">›</span>
+      </div>
+      <div class="settings-row">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px">Overpayments since</div>
+          <div style="font-size:12px;color:var(--text-2)">${c.overSinceCount} logged · you ${fmt(c.overSinceMine)} · Rich ${fmt(c.overSinceRich)}</div>
+        </div>
+      </div>
+    </div>
+    <div style="padding:8px 12px 2px">
+      <button class="btn btn-full" id="mf-rebank" style="background:transparent;border:1.5px solid var(--border);color:var(--text-2)">Re-bank equity as of today</button>
+    </div>`}
+  `;
+
   const oList = p.overpayments.slice().reverse().map(o => `
     <div class="settings-row mf-op-row" data-id="${o.id}" style="cursor:pointer">
       <div style="flex:1;min-width:0">
@@ -4117,6 +4217,7 @@ async function renderMortgageFree() {
         ${row("Rich's monthly overpayment", fmt(p.richOver) + '/mo', 'mf-rich-over')}
         ${row('Projected interest saved', fmt(p.interestSaved))}
       </div>
+      ${contribCard}
       <div style="padding:12px 12px 8px">
         <button class="btn btn-primary btn-full" id="mf-log">＋ Log overpayment</button>
       </div>
@@ -4145,6 +4246,26 @@ async function renderMortgageFree() {
     const o = p.overpayments.find(x => x.id === Number(r.dataset.id));
     if (o) openMortgageOverpaymentEditor(o, reRender, p);
   });
+
+  const setBaseline = viewContainer.querySelector('#mf-set-baseline') || viewContainer.querySelector('#mf-edit-baseline');
+  if (setBaseline) setBaseline.onclick = () => openEquityBaselineEditor(p.contrib, reRender);
+  const editSplit = viewContainer.querySelector('#mf-edit-split');
+  if (editSplit) editSplit.onclick = () => openAmountPad("Rich's share of monthly payment", p.contrib.stdSplitRich, v => {
+    const pct = Math.min(100, Math.max(0, v));
+    setSetting('mtgStdSplitRich', pct).then(() => { queueWrite('settings', 'mtgStdSplitRich').catch(() => {}); reRender(); });
+  }, { noNegative: true, prefix: '', suffix: '%', decimals: 0 });
+  const rebank = viewContainer.querySelector('#mf-rebank');
+  if (rebank) rebank.onclick = async () => {
+    const c = p.contrib;
+    if (!confirm(`Bank the current position as a new starting point?\n\nAs of today: you ${fmt(c.mine)}, Rich ${fmt(c.rich)}.\n\nGoing forward, standard payments and overpayments accrue from here.`)) return;
+    await setSetting('mtgBaselineDate', today());
+    await setSetting('mtgBaselineMine', Math.round(c.mine * 100) / 100);
+    await setSetting('mtgBaselineRich', Math.round(c.rich * 100) / 100);
+    queueWrite('settings', 'mtgBaselineDate').catch(() => {});
+    queueWrite('settings', 'mtgBaselineMine').catch(() => {});
+    queueWrite('settings', 'mtgBaselineRich').catch(() => {});
+    reRender();
+  };
 
   drawMortgageChart(viewContainer.querySelector('#mf-chart'), p);
 }
@@ -4246,6 +4367,72 @@ async function openMortgageOverpaymentEditor(existing, onSaved, proj) {
     showToast('Overpayment deleted');
     onSaved?.();
   });
+}
+
+// Bank a starting position for the mortgage contribution split: freeze how much
+// each person has contributed up to a chosen date, so the fair split can carry
+// forward without needing the full historical payment record.
+async function openEquityBaselineEditor(contrib, onSaved) {
+  let bDate = contrib.baselineDate ?? today();
+  let mine = contrib.baselineMine ?? 0;
+  let rich = contrib.baselineRich ?? 0;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <span class="sheet-title">Bank a starting position</span>
+        <button class="sheet-close" id="eb-close">✕</button>
+      </div>
+      <div class="sheet-body" style="padding:16px">
+        <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:var(--text-2);line-height:1.5">
+          Enter the total each of you has contributed to the mortgage up to this date (standard payments + overpayments). This freezes the agreed split; contributions after this date are tracked automatically.
+        </div>
+        <div class="form-group" style="cursor:pointer" id="eb-date-row">
+          <label class="form-label">As of date</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="eb-date-disp">${fmtDate(bDate)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="eb-my-row">
+          <label class="form-label">You contributed to date</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="eb-my-disp" style="font-size:16px;font-weight:600">${fmt(mine)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <div class="form-group" style="cursor:pointer" id="eb-rich-row">
+          <label class="form-label">Rich contributed to date</label>
+          <div class="form-input" style="display:flex;align-items:center;justify-content:space-between">
+            <span id="eb-rich-disp" style="font-size:16px;font-weight:600">${fmt(rich)}</span><span style="color:var(--text-2)">›</span>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-full" id="eb-save">Save</button>
+      </div>
+    </div>`;
+
+  overlay.querySelector('#eb-close').onclick = () => overlay.remove();
+  overlay.querySelector('#eb-date-row').onclick = () => openDatePicker(bDate, today(), d => { bDate = d; overlay.querySelector('#eb-date-disp').textContent = fmtDate(d); });
+  overlay.querySelector('#eb-my-row').onclick = () => openAmountPad('You contributed to date', mine, v => { mine = Math.max(0, v); overlay.querySelector('#eb-my-disp').textContent = fmt(mine); }, { noNegative: true });
+  overlay.querySelector('#eb-rich-row').onclick = () => openAmountPad('Rich contributed to date', rich, v => { rich = Math.max(0, v); overlay.querySelector('#eb-rich-disp').textContent = fmt(rich); }, { noNegative: true });
+
+  overlay.querySelector('#eb-save').onclick = async () => {
+    await setSetting('mtgBaselineDate', bDate);
+    await setSetting('mtgBaselineMine', mine || 0);
+    await setSetting('mtgBaselineRich', rich || 0);
+    if (await getSetting('mtgStdSplitRich') == null) await setSetting('mtgStdSplitRich', 50);
+    queueWrite('settings', 'mtgBaselineDate').catch(() => {});
+    queueWrite('settings', 'mtgBaselineMine').catch(() => {});
+    queueWrite('settings', 'mtgBaselineRich').catch(() => {});
+    queueWrite('settings', 'mtgStdSplitRich').catch(() => {});
+    overlay.remove();
+    showToast('Starting position banked');
+    onSaved?.();
+  };
 }
 
 // ── Financial goals: Help to Buy equity buy-back ──────────────────────────────
@@ -7096,7 +7283,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 3 Sep 2026 at 11:53 BST (v79)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 6 Sep 2026 at 23:06 BST (v80)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
