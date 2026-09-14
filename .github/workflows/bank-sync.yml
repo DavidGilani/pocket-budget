@@ -6,9 +6,10 @@ name: Bank sync (nightly)
 
 on:
   schedule:
-    # Every 6 hours = 4x/day, the most Open Banking allows without the user
-    # present. Best-effort timing (GitHub may delay scheduled runs).
-    - cron: "0 */6 * * *"
+    # Nightly. Open Banking allows ~4 unattended pulls a day; keeping the
+    # schedule to one leaves the rest for on-demand "Pull from bank now" taps
+    # (which also arrive here via workflow_dispatch). Timing is best-effort.
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 jobs:

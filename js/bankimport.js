@@ -187,6 +187,38 @@ export async function fetchPending() {
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
+// The go-live cutoff: transactions on/before it are never offered.
+export function cutoffFrom(meta) {
+  return meta?.importCutoffDate || (meta?.connectedAt ? String(meta.connectedAt).slice(0, 10) : null);
+}
+
+// Pending rows that are actually reviewable (after the cutoff). This is the
+// single source of truth for the badge, the review screen and auto-accept, so
+// they can never disagree about what's outstanding.
+export async function fetchReviewable() {
+  const [meta, pending] = await Promise.all([getBankMeta(), fetchPending()]);
+  const cutoff = cutoffFrom(meta);
+  const items = cutoff ? pending.filter(i => (i.date || '') > cutoff) : pending;
+  return { meta, cutoff, items, hidden: pending.length - items.length };
+}
+
+// Ask the secure trigger (Cloudflare Worker) to run the bank pull now. The
+// Worker verifies this user's Firebase login before touching GitHub, so no
+// secret ever lives in the app.
+export async function requestBankPullNow() {
+  const url = await getSetting('bankPullUrl');
+  if (!url) throw new Error('No pull endpoint set');
+  if (!auth.currentUser) throw new Error('Not signed in');
+  const idToken = await auth.currentUser.getIdToken();
+  const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${idToken}` } });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch {}
+    throw new Error(msg);
+  }
+  return true;
+}
+
 async function markImport(id, status, extra = {}) {
   if (!auth.currentUser) return;
   await setDoc(doc(firestore, 'users', auth.currentUser.uid, 'importQueue', String(id)),

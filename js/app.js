@@ -5,7 +5,7 @@ import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays,
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
 import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
 import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount, downloadAllFromCloud, getCloudCounts, pingFirestore, getLastUploadReport } from './sync.js';
-import { fetchPending, getBankMeta, proposeForItem, confirmImport, ignoreImport, loadLearnedRules, upsertLearnedRule, processAutoAccepts, isAutoAcceptOn, setImportCutoff, findPossibleDuplicate } from './bankimport.js';
+import { fetchReviewable, proposeForItem, confirmImport, ignoreImport, loadLearnedRules, upsertLearnedRule, processAutoAccepts, isAutoAcceptOn, setImportCutoff, findPossibleDuplicate, requestBankPullNow } from './bankimport.js';
 
 const state = {
   view: 'balance',
@@ -7298,7 +7298,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 11:59 BST (v84)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 12:05 BST (v85)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7311,7 +7311,7 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-trip-split').onclick = () => navigate('groupTrips');
   viewContainer.querySelector('#nav-bank-import').onclick = () => navigate('bankImport');
   // Lazily fill the pending-review count without blocking the settings render.
-  fetchPending().then(items => {
+  fetchReviewable().then(({ items }) => {
     const n = items.length;
     const badge = viewContainer.querySelector('#bank-import-badge');
     if (badge && n > 0) {
@@ -7457,10 +7457,9 @@ async function processBankImportsBackground() {
   try {
     if (!auth.currentUser) return;
     if (!(await isAutoAcceptOn())) return;
-    const [pending, learned, meta] = await Promise.all([fetchPending(), loadLearnedRules(), getBankMeta()]);
-    if (!pending.length) return;
-    const cutoff = meta?.importCutoffDate || (meta?.connectedAt ? String(meta.connectedAt).slice(0, 10) : null);
-    const n = await processAutoAccepts(pending, learned, cutoff);
+    const [{ items, cutoff }, learned] = await Promise.all([fetchReviewable(), loadLearnedRules()]);
+    if (!items.length) return;
+    const n = await processAutoAccepts(items, learned, cutoff);
     if (n > 0 && state.view === 'balance') renderBalance();
   } catch (e) {
     console.debug('bank auto-accept skipped:', e.message);
@@ -7477,16 +7476,13 @@ async function renderBankImport() {
     return;
   }
 
-  const [meta, learned, autoOn] = await Promise.all([getBankMeta(), loadLearnedRules(), isAutoAcceptOn()]);
-  const cutoff = meta?.importCutoffDate || (meta?.connectedAt ? String(meta.connectedAt).slice(0, 10) : null);
+  const [learned, autoOn, pullUrl] = await Promise.all([loadLearnedRules(), isAutoAcceptOn(), getSetting('bankPullUrl')]);
+  let { meta, cutoff, items: pending, hidden: hiddenPreCutoff } = await fetchReviewable();
 
-  let pending = await fetchPending();
-  // Never offer anything on/before the go-live cutoff — those overlap with
-  // transactions already logged manually.
-  if (cutoff) pending = pending.filter(item => (item.date || '') > cutoff);
-  const hiddenPreCutoff = (await fetchPending()).length - pending.length;
-
-  if (autoOn && pending.length) { await processAutoAccepts(pending, learned, cutoff); pending = (await fetchPending()).filter(item => !cutoff || (item.date || '') > cutoff); }
+  if (autoOn && pending.length) {
+    await processAutoAccepts(pending, learned, cutoff);
+    ({ items: pending, hidden: hiddenPreCutoff } = await fetchReviewable());
+  }
 
   const allCats = await db.categories.toArray();
   const catMap = Object.fromEntries(allCats.map(c => [c.id, c]));
@@ -7528,8 +7524,14 @@ async function renderBankImport() {
       <div style="display:flex;align-items:center;gap:8px;padding:10px 16px 2px">
         <div style="color:var(--text-2);font-size:12px;flex:1">${meta?.lastSyncAt ? `Last checked ${fmtDate(String(meta.lastSyncAt).slice(0, 10))}` : 'Not synced yet'}</div>
         <button id="bi-refresh" style="font-size:12px;padding:5px 12px;border-radius:16px;border:1.5px solid var(--border);background:transparent;color:var(--text);cursor:pointer">↻ Refresh</button>
+        ${pullUrl ? `<button id="bi-pull" style="font-size:12px;padding:5px 12px;border-radius:16px;border:none;background:var(--primary,#1a73e8);color:#fff;cursor:pointer;font-weight:600">⚡ Pull from bank now</button>` : ''}
       </div>
       <div class="settings-card" style="margin:8px 12px">
+        <div class="settings-row" id="bi-pull-url-row" style="cursor:pointer">
+          <span class="settings-row-label">Instant pull endpoint</span>
+          <span style="margin-left:auto;font-size:12px;color:var(--text-2);max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pullUrl ? String(pullUrl).replace(/^https?:\/\//, '') : 'not set'}</span>
+          <span class="settings-row-chevron">›</span>
+        </div>
         <div class="settings-row" id="bi-cutoff-row" style="cursor:pointer">
           <span class="settings-row-label">Import spend from</span>
           <span style="margin-left:auto;font-weight:600">${cutoff ? fmtDate(cutoff) : 'set a date'}</span>
@@ -7558,6 +7560,30 @@ async function renderBankImport() {
   };
 
   viewContainer.querySelector('#bi-refresh').onclick = reRender;
+
+  const pullBtn = viewContainer.querySelector('#bi-pull');
+  if (pullBtn) pullBtn.onclick = async () => {
+    pullBtn.disabled = true; pullBtn.textContent = '⏳ Asking the bank…';
+    try {
+      await requestBankPullNow();
+      showToast('Pull started — new spend appears in ~1–2 min');
+      // The GitHub job takes about a minute; re-check automatically.
+      setTimeout(() => { if (state.view === 'bankImport') reRender(); }, 90000);
+      pullBtn.textContent = '✓ Started';
+    } catch (e) {
+      showToast('Pull failed: ' + e.message);
+      pullBtn.disabled = false; pullBtn.textContent = '⚡ Pull from bank now';
+    }
+  };
+
+  viewContainer.querySelector('#bi-pull-url-row').onclick = async () => {
+    const cur = (await getSetting('bankPullUrl')) || '';
+    const v = prompt('Paste your Cloudflare Worker URL (the instant-pull endpoint). Leave blank to remove.', cur);
+    if (v === null) return;
+    await setSetting('bankPullUrl', v.trim());
+    queueWrite('settings', 'bankPullUrl').catch(() => {});
+    reRender();
+  };
 
   const cutoffRow = viewContainer.querySelector('#bi-cutoff-row');
   if (cutoffRow) cutoffRow.onclick = () => openDatePicker(cutoff || today(), today(), async d => {
