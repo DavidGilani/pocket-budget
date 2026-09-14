@@ -1,0 +1,235 @@
+// Bank import: turn raw Lloyds card transactions (queued in Firestore by the
+// nightly GitHub Action) into clean, categorised Pocket Ledger transactions.
+//
+// This module is pure logic + Firestore IO — no DOM. The review UI lives in
+// app.js (renderBankImport) and calls into here.
+//
+// Flow:
+//   • The nightly job writes raw rows to users/<uid>/importQueue (status
+//     'pending'), only for dates after the go-live cutoff.
+//   • proposeForItem() cleans the merchant name and picks a category, using a
+//     seed rule pack + rules the user has taught by confirming past items.
+//   • Fully-known merchants (high confidence, no extra detail needed) are
+//     auto-accepted; everything else waits in the in-app review inbox.
+//   • Deduplication is permanent: a confirmed transaction carries the bank's
+//     transaction id, and we never import the same id twice.
+
+import { db, getSetting } from './db.js';
+import { auth, firestore, collection, doc, getDocs, setDoc, query, where } from './firebase.js';
+import { queueWrite } from './sync.js';
+
+// ── Seed rules ────────────────────────────────────────────────────────────────
+// `match` is tested (as a substring) against the normalised descriptor. Order
+// matters: put more specific entries first (e.g. "uber eats" before "uber").
+// Category ids come from SEED_CATEGORIES in db.js.
+export const SEED_RULES = [
+  // Groceries (cat 2)
+  { match: 'tesco', name: 'Tesco', categoryId: 2 },
+  { match: 'sainsbury', name: "Sainsbury's", categoryId: 2 },
+  { match: 'asda', name: 'Asda', categoryId: 2 },
+  { match: 'aldi', name: 'Aldi', categoryId: 2 },
+  { match: 'lidl', name: 'Lidl', categoryId: 2 },
+  { match: 'waitrose', name: 'Waitrose', categoryId: 2 },
+  { match: 'morrison', name: 'Morrisons', categoryId: 2 },
+  { match: 'ocado', name: 'Ocado', categoryId: 2 },
+  { match: 'iceland', name: 'Iceland', categoryId: 2 },
+  { match: 'co op', name: 'Co-op', categoryId: 2 },
+  { match: 'coop', name: 'Co-op', categoryId: 2 },
+  // Transport (cat 1)
+  { match: 'tfl', name: 'Transport for London', categoryId: 1,
+    amountRules: [ { match: 'eq', value: 1.75, name: 'Bus', categoryId: 1 },
+                   { match: 'default', name: 'Tube', categoryId: 1 } ] },
+  { match: 'trainline', name: 'Trainline', categoryId: 1 },
+  { match: 'national rail', name: 'Train', categoryId: 1 },
+  { match: 'ubereats', name: 'Uber Eats', categoryId: 6 },
+  { match: 'uber eats', name: 'Uber Eats', categoryId: 6 },
+  { match: 'uber', name: 'Uber', categoryId: 1 },
+  { match: 'bolt', name: 'Bolt', categoryId: 1 },
+  { match: 'shell', name: 'Shell (fuel)', categoryId: 1 },
+  { match: 'esso', name: 'Esso (fuel)', categoryId: 1 },
+  { match: 'texaco', name: 'Texaco (fuel)', categoryId: 1 },
+  // Takeaway (cat 6) / food out (cat 3) / restaurant (cat 4)
+  { match: 'deliveroo', name: 'Deliveroo', categoryId: 6 },
+  { match: 'just eat', name: 'Just Eat', categoryId: 6 },
+  { match: 'justeat', name: 'Just Eat', categoryId: 6 },
+  { match: 'mcdonald', name: "McDonald's", categoryId: 6 },
+  { match: 'greggs', name: 'Greggs', categoryId: 3 },
+  { match: 'pret', name: 'Pret', categoryId: 3 },
+  { match: 'costa', name: 'Costa', categoryId: 3 },
+  { match: 'starbucks', name: 'Starbucks', categoryId: 3 },
+  { match: 'caffe nero', name: 'Caffè Nero', categoryId: 3 },
+  { match: 'nando', name: "Nando's", categoryId: 4 },
+  // Entertainment / subscriptions (cat 5)
+  { match: 'netflix', name: 'Netflix', categoryId: 5 },
+  { match: 'spotify', name: 'Spotify', categoryId: 5 },
+  { match: 'disney', name: 'Disney+', categoryId: 5 },
+  { match: 'youtube', name: 'YouTube', categoryId: 5 },
+  { match: 'cineworld', name: 'Cineworld', categoryId: 5 },
+  { match: 'odeon', name: 'Odeon', categoryId: 5 },
+  { match: 'amazon prime', name: 'Amazon Prime', categoryId: 5 },
+  // Health & beauty (8), clothing (10), household (9)
+  { match: 'boots', name: 'Boots', categoryId: 8 },
+  { match: 'superdrug', name: 'Superdrug', categoryId: 8 },
+  { match: 'primark', name: 'Primark', categoryId: 10 },
+  { match: 'uniqlo', name: 'Uniqlo', categoryId: 10 },
+  { match: 'ikea', name: 'IKEA', categoryId: 9 },
+  { match: 'screwfix', name: 'Screwfix', categoryId: 9 },
+  { match: 'argos', name: 'Argos', categoryId: 9 },
+  // Catch-alls that need a note (name known, but spend could be anything)
+  { match: 'amzn', name: 'Amazon', categoryId: 28, promptDetail: true },
+  { match: 'amazon', name: 'Amazon', categoryId: 28, promptDetail: true },
+  { match: 'paypal', name: 'PayPal', categoryId: 28, promptDetail: true },
+  { match: 'apple', name: 'Apple', categoryId: 28, promptDetail: true },
+  { match: 'sumup', name: 'SumUp', categoryId: 28, promptDetail: true },
+  { match: 'zettle', name: 'Zettle', categoryId: 28, promptDetail: true },
+];
+
+// ── Descriptor cleaning ───────────────────────────────────────────────────────
+// Strip Lloyds noise (URLs, country codes, digits, punctuation, company suffixes)
+// down to a lowercase token stream we can match rules against.
+export function normaliseDescriptor(raw) {
+  return (raw || '')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\b[\w.-]+\.(co\.uk|com|org|net|gov\.uk|io|uk)\b/g, ' ')
+    .replace(/[^a-z ]+/g, ' ')                       // drop digits & punctuation
+    .replace(/\b(ltd|limited|plc|gb|uk|the|card|purchase|payment)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function titleCase(s) {
+  return (s || '').split(' ').filter(Boolean).slice(0, 3)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// ── Proposal ──────────────────────────────────────────────────────────────────
+// Given a queue item and the learned rules, return the suggested name, category,
+// whether it needs a note, a confidence level, and the derived amount fields.
+export function proposeForItem(item, learnedRules = []) {
+  const raw = Number(item.amount) || 0;
+  const isDebit = (item.bankType || '').toUpperCase() === 'DEBIT' || raw < 0;
+  const absAmount = Math.abs(raw);
+  const signedAmount = isDebit ? -absAmount : absAmount;   // expense negative
+  const type = isDebit ? 'expense' : 'income';
+  const desc = item.description || item.merchant || '';
+  const norm = normaliseDescriptor(desc);
+
+  const base = { token: norm, isDebit, signedAmount, absAmount, type };
+
+  // Learned rules win over seed rules (the user's own choices).
+  for (const r of learnedRules) {
+    if (r.token && norm.includes(r.token)) {
+      return { ...base, name: r.name, categoryId: r.categoryId, promptDetail: false, confidence: 'high' };
+    }
+  }
+  for (const r of SEED_RULES) {
+    if (norm.includes(r.match)) {
+      let name = r.name, categoryId = r.categoryId;
+      if (r.amountRules) {
+        const hit = r.amountRules.find(a => a.match === 'eq' && Math.abs(absAmount - a.value) < 0.005)
+          || r.amountRules.find(a => a.match === 'default');
+        if (hit) { name = hit.name ?? name; categoryId = hit.categoryId ?? categoryId; }
+      }
+      return { ...base, name, categoryId, promptDetail: !!r.promptDetail, confidence: 'high' };
+    }
+  }
+  // No rule matched — best-effort name, must be reviewed.
+  const guess = (item.merchant || '').trim() || titleCase(norm) || desc.slice(0, 24) || 'Unknown';
+  return { ...base, name: guess, categoryId: 28, promptDetail: true, confidence: 'low' };
+}
+
+// ── Firestore IO ──────────────────────────────────────────────────────────────
+function importQueueRef() {
+  return collection(firestore, 'users', auth.currentUser.uid, 'importQueue');
+}
+function bankMetaRef() {
+  return doc(firestore, 'users', auth.currentUser.uid, 'meta', 'bankConnection');
+}
+
+export async function getBankMeta() {
+  if (!auth.currentUser) return null;
+  try {
+    const snap = await getDocs(query(collection(firestore, 'users', auth.currentUser.uid, 'meta')));
+    const row = snap.docs.find(d => d.id === 'bankConnection');
+    return row ? row.data() : null;
+  } catch { return null; }
+}
+
+export async function fetchPending() {
+  if (!auth.currentUser) return [];
+  const snap = await getDocs(query(importQueueRef(), where('status', '==', 'pending')));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+async function markImport(id, status, extra = {}) {
+  if (!auth.currentUser) return;
+  await setDoc(doc(firestore, 'users', auth.currentUser.uid, 'importQueue', String(id)),
+    { status, actionedAt: new Date().toISOString(), ...extra }, { merge: true });
+}
+
+// ── Learned rules ─────────────────────────────────────────────────────────────
+export async function loadLearnedRules() {
+  try { return await db.merchantRules.toArray(); } catch { return []; }
+}
+
+export async function upsertLearnedRule(token, { name, categoryId }) {
+  if (!token) return;
+  const existing = await db.merchantRules.where('token').equals(token).first();
+  if (existing) {
+    await db.merchantRules.update(existing.id, { name, categoryId, hits: (existing.hits || 0) + 1 });
+    queueWrite('merchantRules', existing.id).catch(() => {});
+  } else {
+    const id = await db.merchantRules.add({ token, name, categoryId, hits: 1, createdAt: new Date().toISOString() });
+    queueWrite('merchantRules', id).catch(() => {});
+  }
+}
+
+// ── Creating the transaction ──────────────────────────────────────────────────
+// Idempotent: if a transaction already carries this bank id, we skip creating a
+// second one (belt-and-braces on top of the queue's own status).
+export async function confirmImport(item, { name, categoryId, note }) {
+  const raw = Number(item.amount) || 0;
+  const isDebit = (item.bankType || '').toUpperCase() === 'DEBIT' || raw < 0;
+  const signedAmount = isDebit ? -Math.abs(raw) : Math.abs(raw);
+
+  const dupe = await db.transactions.where('bankTransactionId').equals(String(item.bankTransactionId)).count();
+  if (dupe > 0) { await markImport(item.id, 'imported', { note: 'already existed' }); return null; }
+
+  const now = new Date().toISOString();
+  const txn = {
+    date: item.date, amount: signedAmount, categoryId,
+    note: (note != null ? note : name || '').trim(),
+    type: isDebit ? 'expense' : 'income', distributionId: null,
+    bankTransactionId: String(item.bankTransactionId), source: 'truelayer',
+    createdAt: now, updatedAt: now, syncStatus: 'pending',
+  };
+  const txId = await db.transactions.add(txn);
+  queueWrite('transactions', txId).catch(() => {});
+  await markImport(item.id, 'imported', { importedTxId: txId });
+  return txId;
+}
+
+export async function ignoreImport(id) {
+  await markImport(id, 'ignored');
+}
+
+// ── Auto-accept pass ──────────────────────────────────────────────────────────
+// Import every fully-known item (high confidence, no note needed) automatically.
+// Returns the number accepted. Items needing review are left in the queue.
+export async function processAutoAccepts(pending, learnedRules) {
+  let accepted = 0;
+  for (const item of pending) {
+    const p = proposeForItem(item, learnedRules);
+    if (p.confidence === 'high' && !p.promptDetail) {
+      await confirmImport(item, { name: p.name, categoryId: p.categoryId });
+      accepted++;
+    }
+  }
+  return accepted;
+}
+
+export async function isAutoAcceptOn() {
+  return (await getSetting('bankAutoAccept')) === true;
+}

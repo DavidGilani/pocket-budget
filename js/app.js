@@ -5,6 +5,7 @@ import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays,
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
 import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
 import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount, downloadAllFromCloud, getCloudCounts, pingFirestore, getLastUploadReport } from './sync.js';
+import { fetchPending, getBankMeta, proposeForItem, confirmImport, ignoreImport, loadLearnedRules, upsertLearnedRule, processAutoAccepts, isAutoAcceptOn } from './bankimport.js';
 
 const state = {
   view: 'balance',
@@ -109,6 +110,7 @@ async function renderView(view) {
       case 'yearlyTrends': await renderYearlyTrends(); break;
       case 'settings':     await renderSettings(); break;
       case 'import':       renderImport(); break;
+      case 'bankImport':   await renderBankImport(); break;
       default:             await renderBalance();
     }
   } catch (err) {
@@ -7266,6 +7268,7 @@ async function renderSettings() {
           <div class="settings-row" id="nav-household-bills"><span class="settings-row-icon">🏠</span><span class="settings-row-label">Household bills (Rich)</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-money-owed"><span class="settings-row-icon">💸</span><span class="settings-row-label">Money friends owe</span><span class="settings-row-chevron">›</span></div>
           <div class="settings-row" id="nav-trip-split"><span class="settings-row-icon">🧳</span><span class="settings-row-label">Trip splitter</span><span class="settings-row-chevron">›</span></div>
+          <div class="settings-row" id="nav-bank-import"><span class="settings-row-icon">💳</span><span class="settings-row-label">Card transactions</span><span id="bank-import-badge" style="margin-left:auto"></span><span class="settings-row-chevron">›</span></div>
         </div>
       </div>
       <div class="settings-section">
@@ -7295,7 +7298,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 7 Sep 2026 at 11:24 BST (v81)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 11:22 BST (v82)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7306,6 +7309,16 @@ async function renderSettings() {
   viewContainer.querySelector('#nav-household-bills').onclick = () => navigate('householdBills');
   viewContainer.querySelector('#nav-money-owed').onclick = () => navigate('moneyFriendOwe');
   viewContainer.querySelector('#nav-trip-split').onclick = () => navigate('groupTrips');
+  viewContainer.querySelector('#nav-bank-import').onclick = () => navigate('bankImport');
+  // Lazily fill the pending-review count without blocking the settings render.
+  fetchPending().then(items => {
+    const n = items.length;
+    const badge = viewContainer.querySelector('#bank-import-badge');
+    if (badge && n > 0) {
+      badge.textContent = String(n);
+      badge.style.cssText = 'margin-left:auto;background:var(--red,#e53935);color:#fff;font-size:12px;font-weight:700;min-width:20px;height:20px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;padding:0 6px';
+    }
+  }).catch(() => {});
   viewContainer.querySelector('#nav-net-wealth').onclick = () => navigate('netWealth');
   viewContainer.querySelector('#nav-mortgage-free').onclick = () => navigate('mortgageFree');
   viewContainer.querySelector('#nav-help-to-buy').onclick = () => navigate('helpToBuy');
@@ -7436,6 +7449,122 @@ async function renderSettings() {
   };
   const signOutBtn = viewContainer.querySelector('#sign-out-btn');
   if (signOutBtn) signOutBtn.onclick = async () => { await signOutUser(); renderSettings(); };
+}
+
+// Background pass: silently auto-accept fully-known card transactions when the
+// user has opted in. Runs on sign-in and after each cloud pull.
+async function processBankImportsBackground() {
+  try {
+    if (!auth.currentUser) return;
+    if (!(await isAutoAcceptOn())) return;
+    const [pending, learned] = await Promise.all([fetchPending(), loadLearnedRules()]);
+    if (!pending.length) return;
+    const n = await processAutoAccepts(pending, learned);
+    if (n > 0 && state.view === 'balance') renderBalance();
+  } catch (e) {
+    console.debug('bank auto-accept skipped:', e.message);
+  }
+}
+
+// Review inbox for imported Lloyds card transactions.
+async function renderBankImport() {
+  const back = `<button class="icon-btn" onclick="window.app.goBack()"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg></button>`;
+  const header = `<div class="screen-header">${back}<span class="screen-title">Card transactions</span><div style="width:34px"></div></div>`;
+
+  if (!auth.currentUser) {
+    viewContainer.innerHTML = `<div class="settings-screen">${header}<div class="empty-state"><div class="empty-icon">🔒</div><div class="empty-text">Sign in (Settings) to see synced card transactions.</div></div></div>`;
+    return;
+  }
+
+  const [meta, learned, autoOn] = await Promise.all([getBankMeta(), loadLearnedRules(), isAutoAcceptOn()]);
+  let pending = await fetchPending();
+  if (autoOn && pending.length) { await processAutoAccepts(pending, learned); pending = await fetchPending(); }
+
+  const allCats = await db.categories.toArray();
+  const catMap = Object.fromEntries(allCats.map(c => [c.id, c]));
+  const cats = allCats.filter(c => !c.isIncome && !c.isArchived).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+
+  const rows = pending.map((item, i) => ({ item, p: proposeForItem(item, learned), i }));
+  const chosenCat = {};
+  rows.forEach(({ p, i }) => { chosenCat[i] = p.categoryId; });
+
+  const cardHtml = rows.map(({ item, p, i }) => {
+    const cat = catMap[p.categoryId];
+    const prefill = (p.promptDetail && p.confidence === 'high') ? `${p.name} – ` : p.name;
+    return `
+    <div class="settings-card" style="margin:8px 12px;padding:12px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(item.date)}</div>
+      </div>
+      <div style="font-size:11px;color:var(--text-2);margin:2px 0 8px;word-break:break-word">${String(item.description || '').replace(/</g, '&lt;')}</div>
+      <input class="form-input bi-desc" data-idx="${i}" value="${String(prefill).replace(/"/g, '&quot;')}" style="margin-bottom:8px">
+      <button class="bi-cat" data-idx="${i}" style="width:100%;text-align:left;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;background:transparent;cursor:pointer">
+        <span class="bi-cat-label">${cat ? cat.icon + ' ' + cat.name : 'Choose category'}</span>
+      </button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn bi-ignore" data-idx="${i}" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text-2)">Ignore</button>
+        <button class="btn btn-primary bi-confirm" data-idx="${i}" style="flex:2">Confirm</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  viewContainer.innerHTML = `
+    <div class="settings-screen">
+      ${header}
+      ${meta?.needsReconsent ? `<div style="margin:8px 12px;padding:12px;border-radius:10px;background:#fff3e0;color:#e65100;font-size:13px">⚠️ Bank connection expired. Re-run the “Bank connect” step in GitHub Actions to resume automatic imports.</div>` : ''}
+      <div style="padding:10px 16px 2px;color:var(--text-2);font-size:12px">
+        ${meta?.lastSyncAt ? `Last checked ${fmtDate(String(meta.lastSyncAt).slice(0, 10))}` : 'Not synced yet'}${meta?.importCutoffDate ? ` · importing spend from ${fmtDate(meta.importCutoffDate)}` : ''}
+      </div>
+      <div class="settings-card" style="margin:8px 12px">
+        <div class="settings-row">
+          <span class="settings-row-label">Auto-accept known merchants</span>
+          <input type="checkbox" id="bi-auto" ${autoOn ? 'checked' : ''} style="margin-left:auto;width:20px;height:20px">
+        </div>
+        <div style="padding:0 16px 10px;font-size:12px;color:var(--text-2);line-height:1.4">When on, transactions from merchants the app already recognises are added automatically; only new or ambiguous ones (like Amazon) wait here for you.</div>
+      </div>
+      ${rows.length
+        ? `<div style="padding:10px 16px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)">${rows.length} to review</div>${cardHtml}`
+        : `<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-text">Nothing to review.${autoOn ? ' Known spend is added automatically; new merchants will appear here.' : ' New card spend will appear here.'}</div></div>`}
+      <div style="padding-bottom:80px"></div>
+    </div>`;
+
+  const reRender = () => renderBankImport();
+
+  const autoToggle = viewContainer.querySelector('#bi-auto');
+  if (autoToggle) autoToggle.onchange = async () => {
+    await setSetting('bankAutoAccept', autoToggle.checked);
+    queueWrite('settings', 'bankAutoAccept').catch(() => {});
+    reRender();
+  };
+
+  viewContainer.querySelectorAll('.bi-cat').forEach(btn => btn.onclick = () => {
+    const idx = btn.dataset.idx;
+    openCategoryPicker(cats, chosenCat[idx], (catId, name, icon) => {
+      chosenCat[idx] = catId;
+      btn.querySelector('.bi-cat-label').textContent = `${icon} ${name}`;
+    });
+  });
+
+  viewContainer.querySelectorAll('.bi-confirm').forEach(btn => btn.onclick = async () => {
+    const i = Number(btn.dataset.idx);
+    const { item, p } = rows[i];
+    const desc = (viewContainer.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim();
+    const categoryId = chosenCat[i] ?? p.categoryId;
+    await confirmImport(item, { name: p.name, categoryId, note: desc });
+    // Teach the rules engine: the base name (before any " – detail") + category,
+    // so this merchant auto-fills (and can auto-accept) next time.
+    const learnName = (desc.split('–')[0] || p.name).trim() || p.name;
+    await upsertLearnedRule(p.token, { name: learnName, categoryId });
+    showToast('Added to transactions');
+    reRender();
+  });
+
+  viewContainer.querySelectorAll('.bi-ignore').forEach(btn => btn.onclick = async () => {
+    await ignoreImport(rows[Number(btn.dataset.idx)].item.id);
+    showToast('Ignored');
+    reRender();
+  });
 }
 
 function renderImport() {
@@ -7703,7 +7832,11 @@ async function init() {
   initSync(user => {
     state.currentUser = user;
     if (state.view === 'settings') renderSettings();
-  }, regenerateAllDistributionChildren);
+    processBankImportsBackground();
+  }, async () => {
+    await regenerateAllDistributionChildren();
+    await processBankImportsBackground();
+  });
   onSync(() => {
     if (state.view === 'settings') renderSettings();
   });
@@ -7727,7 +7860,7 @@ init().catch(console.error);
     'breakdown', 'recurring', 'extraIncomes', 'distributions', 'netWealth',
     'mortgageFree', 'helpToBuy', 'investments', 'charity', 'pension',
     'bankGilulu', 'householdBills', 'accounts', 'yearlyTrends', 'import',
-    'taxReturns', 'moneyFriendOwe', 'groupTrips', 'tripDetail',
+    'taxReturns', 'moneyFriendOwe', 'groupTrips', 'tripDetail', 'bankImport',
   ]);
   let startX = 0, startY = 0, tracking = false;
   viewContainer.addEventListener('touchstart', e => {

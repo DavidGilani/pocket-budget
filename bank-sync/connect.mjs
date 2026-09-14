@@ -25,10 +25,21 @@ if (!tok.refresh_token) {
   throw new Error('Exchange succeeded but no refresh_token was returned (was "offline_access" in the auth scope?).');
 }
 
-await userRef().collection('meta').doc('bankConnection').set({
+// Only import transactions dated AFTER the cutoff, so nothing already logged
+// manually before go-live gets duplicated. Set once, on first connect, and
+// preserved across later reconnects (don't move the cutoff backwards/forwards
+// under the user).
+const connRef = userRef().collection('meta').doc('bankConnection');
+const existing = await connRef.get();
+const cutoff = existing.exists && existing.data().importCutoffDate
+  ? existing.data().importCutoffDate
+  : new Date().toISOString().slice(0, 10);
+
+await connRef.set({
   refreshToken: tok.refresh_token,
   env: TL.env,
   connectedAt: new Date().toISOString(),
+  importCutoffDate: cutoff,
   needsReconsent: false,
   lastError: null,
 }, { merge: true });

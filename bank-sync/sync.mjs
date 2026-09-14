@@ -43,17 +43,24 @@ async function api(path) {
   return res.json();
 }
 
+// Go-live cutoff: import only transactions dated after this, so anything
+// already logged manually before go-live is never re-created.
+const cutoff = conn.data().importCutoffDate
+  || (conn.data().connectedAt ? conn.data().connectedAt.slice(0, 10) : '0000-00-00');
+
 // 2. Cards on this consent.
 const cards = (await api('/data/v1/cards')).results || [];
 
 // 3. Transactions per card -> import queue.
 const queue = ref.collection('importQueue');
-let seen = 0, queued = 0;
+let seen = 0, queued = 0, skippedPreCutoff = 0;
 
 for (const card of cards) {
   const txns = (await api(`/data/v1/cards/${card.account_id}/transactions`)).results || [];
   for (const t of txns) {
     seen++;
+    const txDate = (t.timestamp || '').slice(0, 10);
+    if (txDate && txDate <= cutoff) { skippedPreCutoff++; continue; }
     const id = t.transaction_id || t.normalised_provider_transaction_id;
     if (!id) continue;
     try {
@@ -80,5 +87,15 @@ for (const card of cards) {
   }
 }
 
+// Housekeeping: remove any still-pending queue rows dated on/before the cutoff.
+// These can exist from an earlier run before the cutoff was introduced; they
+// must never be offered for import (they'd duplicate manual pre-go-live entries).
+let cleaned = 0;
+const pending = await queue.where('status', '==', 'pending').get();
+for (const d of pending.docs) {
+  const dt = d.data().date || '';
+  if (dt && dt <= cutoff) { await d.ref.delete(); cleaned++; }
+}
+
 await connDoc.set({ lastSyncAt: new Date().toISOString(), needsReconsent: false, lastError: null }, { merge: true });
-console.log(`Sync complete (${TL.env}). Cards: ${cards.length}; transactions seen: ${seen}; newly queued: ${queued}.`);
+console.log(`Sync complete (${TL.env}). Cards: ${cards.length}; seen: ${seen}; newly queued: ${queued}; skipped pre-cutoff: ${skippedPreCutoff}; cleaned stale: ${cleaned}.`);

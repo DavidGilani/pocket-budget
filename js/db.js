@@ -72,6 +72,14 @@ db.version(8).stores({
   tripSpends: '++id, tripId',
 });
 
+// Bank import (TrueLayer): a `bankTransactionId` index on transactions for
+// permanent dedupe of imported card spend, and `merchantRules` — the learned
+// name/category mappings that make auto-categorisation improve over time.
+db.version(9).stores({
+  transactions:  '++id, date, categoryId, type, distributionId, syncStatus, bankTransactionId',
+  merchantRules: '++id, token',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },
