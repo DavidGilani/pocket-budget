@@ -1,0 +1,31 @@
+name: Bank sync (nightly)
+
+# Pulls new Lloyds credit-card transactions into Firestore's importQueue for
+# review in the app. Runs nightly, and can also be run on demand from the
+# Actions tab (Run workflow). Requires "Bank connect" to have run first.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # ~03:00 UTC nightly (best-effort timing)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        working-directory: bank-sync
+        run: npm install --no-audit --no-fund
+      - name: Fetch transactions -> import queue
+        working-directory: bank-sync
+        env:
+          TL_ENV: live
+          TL_CLIENT_ID: ${{ secrets.TL_CLIENT_ID }}
+          TL_CLIENT_SECRET: ${{ secrets.TL_CLIENT_SECRET }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_UID: ${{ secrets.FIREBASE_UID }}
+        run: node sync.mjs

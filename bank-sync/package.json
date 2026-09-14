@@ -1,0 +1,10 @@
+{
+  "name": "pocket-ledger-bank-sync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Server-side TrueLayer -> Firestore importer for Pocket Ledger. Runs in GitHub Actions only; never in the browser. Secrets are provided as env vars from GitHub Actions secrets.",
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}

@@ -1,0 +1,36 @@
+name: Bank connect (one-time / reconsent)
+
+# Run this manually whenever you (re)authorise the bank: it takes a fresh
+# TrueLayer authorization code and stores a long-lived refresh token in
+# Firestore. Needed once at setup, and again roughly every 90 days when the
+# Open Banking consent expires.
+
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "TrueLayer authorization code (the ?code=... value from the redirect URL)"
+        required: true
+
+jobs:
+  connect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        working-directory: bank-sync
+        run: npm install --no-audit --no-fund
+      - name: Exchange code for refresh token
+        working-directory: bank-sync
+        env:
+          TL_ENV: live
+          TL_CLIENT_ID: ${{ secrets.TL_CLIENT_ID }}
+          TL_CLIENT_SECRET: ${{ secrets.TL_CLIENT_SECRET }}
+          TL_REDIRECT_URI: https://console.truelayer.com/redirect-page
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_UID: ${{ secrets.FIREBASE_UID }}
+          CODE: ${{ inputs.code }}
+        run: node connect.mjs
