@@ -834,6 +834,7 @@ async function renderTransactions() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </span>
       </button>` : `<div style="padding:8px 16px;font-size:13px;color:var(--text-2);background:var(--card);border-bottom:1px solid var(--border)">Searching all transactions (${txns.length} found)</div>`}
+      <div id="txn-review-prompt"></div>
       <div class="search-bar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" id="txn-search" placeholder="Search transactions..." value="${state.txnSearchQuery}" style="flex:1;border:none;outline:none;font-size:15px;background:none" autocomplete="off" autocorrect="off" autocapitalize="off">
@@ -883,6 +884,21 @@ async function renderTransactions() {
 
   const txnScreen = viewContainer.querySelector('.transactions-screen');
   txnScreen.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
+
+  // Prompt to review card transactions that weren't auto-confirmed, without
+  // going into Settings. Filled lazily so it never blocks the list render.
+  fetchReviewable().then(({ items }) => {
+    const host = viewContainer.querySelector('#txn-review-prompt');
+    if (!host || !items.length) return;
+    const n = items.length;
+    host.innerHTML = `
+      <button id="txn-review-btn" style="display:flex;align-items:center;gap:10px;width:100%;padding:12px 16px;border:none;border-bottom:1px solid var(--border);background:#e8f0fe;color:#1a3d7c;cursor:pointer;text-align:left">
+        <span style="font-size:18px">💳</span>
+        <span style="flex:1;font-size:14px;font-weight:600">${n} card transaction${n === 1 ? '' : 's'} to review</span>
+        <span style="font-size:13px;color:#1a73e8;font-weight:600">Review ›</span>
+      </button>`;
+    host.querySelector('#txn-review-btn').onclick = () => openBankReviewSheet(() => renderTransactions());
+  }).catch(() => {});
   let _searchTimer;
   txnScreen.querySelector('#txn-search').addEventListener('input', e => {
     state.txnSearchQuery = e.target.value;
@@ -7298,7 +7314,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 12:05 BST (v85)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 18:19 BST (v86)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7491,31 +7507,7 @@ async function renderBankImport() {
   // Flag rows that look like an existing manual entry (same amount ±1 day).
   const dupFlags = await Promise.all(pending.map(item => findPossibleDuplicate(item)));
   const rows = pending.map((item, i) => ({ item, p: proposeForItem(item, learned), i, dup: dupFlags[i] }));
-  const chosenCat = {};
-  rows.forEach(({ p, i }) => { chosenCat[i] = p.categoryId; });
-
-  const cardHtml = rows.map(({ item, p, i, dup }) => {
-    const cat = catMap[p.categoryId];
-    const prefill = (p.promptDetail && p.confidence === 'high') ? `${p.name} – ` : p.name;
-    return `
-    <div class="settings-card" style="margin:8px 12px;padding:12px${dup ? ';border:1.5px solid #e65100' : ''}">
-      <div style="display:flex;justify-content:space-between;align-items:baseline">
-        <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}${item.bankStatus === 'pending' ? ' <span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:#1a73e8;background:#e8f0fe;border-radius:8px;padding:2px 6px;vertical-align:middle">PENDING</span>' : ''}</div>
-        <div style="font-size:12px;color:var(--text-2)">${fmtDate(item.date)}</div>
-      </div>
-      ${item.bankStatus === 'pending' ? `<div style="font-size:12px;color:var(--text-2);margin-top:4px">Still settling at the bank — the amount may change slightly; it's updated automatically once it posts.</div>` : ''}
-      ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:4px">⚠️ Looks like a transaction you already logged — check before confirming.</div>` : ''}
-      <div style="font-size:11px;color:var(--text-2);margin:2px 0 8px;word-break:break-word">${String(item.description || '').replace(/</g, '&lt;')}</div>
-      <input class="form-input bi-desc" data-idx="${i}" value="${String(prefill).replace(/"/g, '&quot;')}" style="margin-bottom:8px">
-      <button class="bi-cat" data-idx="${i}" style="width:100%;text-align:left;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;background:transparent;cursor:pointer">
-        <span class="bi-cat-label">${cat ? cat.icon + ' ' + cat.name : 'Choose category'}</span>
-      </button>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="btn bi-ignore" data-idx="${i}" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text-2)">Ignore</button>
-        <button class="btn btn-primary bi-confirm" data-idx="${i}" style="flex:2">Confirm</button>
-      </div>
-    </div>`;
-  }).join('');
+  const cardHtml = rows.map(r => bankReviewCardHTML(r, catMap)).join('');
 
   viewContainer.innerHTML = `
     <div class="settings-screen">
@@ -7592,7 +7584,40 @@ async function renderBankImport() {
     reRender();
   });
 
-  viewContainer.querySelectorAll('.bi-cat').forEach(btn => btn.onclick = () => {
+  wireBankReviewCards(viewContainer, rows, cats, catMap, reRender);
+}
+
+// One review card's HTML (shared by the Settings screen and the pop-up sheet).
+function bankReviewCardHTML({ item, p, i, dup }, catMap) {
+  const cat = catMap[p.categoryId];
+  const prefill = (p.promptDetail && p.confidence === 'high') ? `${p.name} – ` : p.name;
+  return `
+    <div class="settings-card" style="margin:8px 12px;padding:12px${dup ? ';border:1.5px solid #e65100' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}${item.bankStatus === 'pending' ? ' <span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:#1a73e8;background:#e8f0fe;border-radius:8px;padding:2px 6px;vertical-align:middle">PENDING</span>' : ''}</div>
+        <div style="font-size:12px;color:var(--text-2)">${fmtDate(item.date)}</div>
+      </div>
+      ${item.bankStatus === 'pending' ? `<div style="font-size:12px;color:var(--text-2);margin-top:4px">Still settling at the bank — the amount may change slightly; it's updated automatically once it posts.</div>` : ''}
+      ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:4px">⚠️ Looks like a transaction you already logged — check before confirming.</div>` : ''}
+      <div style="font-size:11px;color:var(--text-2);margin:2px 0 8px;word-break:break-word">${String(item.description || '').replace(/</g, '&lt;')}</div>
+      <input class="form-input bi-desc" data-idx="${i}" value="${String(prefill).replace(/"/g, '&quot;')}" style="margin-bottom:8px">
+      <button class="bi-cat" data-idx="${i}" style="width:100%;text-align:left;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;background:transparent;cursor:pointer">
+        <span class="bi-cat-label">${cat ? cat.icon + ' ' + cat.name : 'Choose category'}</span>
+      </button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn bi-ignore" data-idx="${i}" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text-2)">Ignore</button>
+        <button class="btn btn-primary bi-confirm" data-idx="${i}" style="flex:2">Confirm</button>
+      </div>
+    </div>`;
+}
+
+// Wire category-pick / confirm / ignore for review cards inside `root`.
+// `afterAction` is called after each confirm/ignore so the caller can re-render.
+function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
+  const chosenCat = {};
+  rows.forEach(({ p, i }) => { chosenCat[i] = p.categoryId; });
+
+  root.querySelectorAll('.bi-cat').forEach(btn => btn.onclick = () => {
     const idx = btn.dataset.idx;
     openCategoryPicker(cats, chosenCat[idx], (catId, name, icon) => {
       chosenCat[idx] = catId;
@@ -7600,26 +7625,58 @@ async function renderBankImport() {
     });
   });
 
-  viewContainer.querySelectorAll('.bi-confirm').forEach(btn => btn.onclick = async () => {
+  root.querySelectorAll('.bi-confirm').forEach(btn => btn.onclick = async () => {
     const i = Number(btn.dataset.idx);
     const { item, p, dup } = rows[i];
     if (dup && !confirm('This looks like a transaction you already logged manually. Add it anyway?')) return;
-    const desc = (viewContainer.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim();
+    const desc = (root.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim();
     const categoryId = chosenCat[i] ?? p.categoryId;
     await confirmImport(item, { name: p.name, categoryId, note: desc });
-    // Teach the rules engine: the base name (before any " – detail") + category,
-    // so this merchant auto-fills (and can auto-accept) next time.
+    // Teach the rules engine: base name (before any " – detail") + category, so
+    // this merchant auto-fills (and can auto-accept) next time.
     const learnName = (desc.split('–')[0] || p.name).trim() || p.name;
     await upsertLearnedRule(p.token, { name: learnName, categoryId });
     showToast('Added to transactions');
-    reRender();
+    afterAction();
   });
 
-  viewContainer.querySelectorAll('.bi-ignore').forEach(btn => btn.onclick = async () => {
+  root.querySelectorAll('.bi-ignore').forEach(btn => btn.onclick = async () => {
     await ignoreImport(rows[Number(btn.dataset.idx)].item.id);
     showToast('Ignored');
-    reRender();
+    afterAction();
   });
+}
+
+// Pop-up review sheet, opened from the transactions page so card spend can be
+// confirmed without going into Settings.
+async function openBankReviewSheet(onDone) {
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  document.body.appendChild(overlay);
+  const close = () => { overlay.remove(); onDone?.(); };
+  overlay.onclick = e => { if (e.target === overlay) close(); };
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header"><span class="sheet-title">Card transactions to review</span><button class="sheet-close" id="brs-close">✕</button></div>
+      <div class="sheet-body" id="brs-body" style="padding:2px 0 20px;max-height:72vh;overflow-y:auto"></div>
+    </div>`;
+  overlay.querySelector('#brs-close').onclick = close;
+  const body = overlay.querySelector('#brs-body');
+
+  async function refresh() {
+    const [{ items }, learned] = await Promise.all([fetchReviewable(), loadLearnedRules()]);
+    if (!items.length) { close(); return; }
+    const allCats = await db.categories.toArray();
+    const catMap = Object.fromEntries(allCats.map(c => [c.id, c]));
+    const cats = allCats.filter(c => !c.isIncome && !c.isArchived).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const dupFlags = await Promise.all(items.map(it => findPossibleDuplicate(it)));
+    const rows = items.map((item, i) => ({ item, p: proposeForItem(item, learned), i, dup: dupFlags[i] }));
+    body.innerHTML = `<div style="padding:8px 16px 2px;font-size:12px;color:var(--text-2)">${rows.length} to review — confirm, edit, or ignore each.</div>`
+      + rows.map(r => bankReviewCardHTML(r, catMap)).join('');
+    wireBankReviewCards(body, rows, cats, catMap, refresh);
+  }
+  await refresh();
 }
 
 function renderImport() {
