@@ -6,7 +6,9 @@ name: Bank sync (nightly)
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # ~03:00 UTC nightly (best-effort timing)
+    # Every 6 hours = 4x/day, the most Open Banking allows without the user
+    # present. Best-effort timing (GitHub may delay scheduled runs).
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:

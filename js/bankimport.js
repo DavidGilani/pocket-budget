@@ -156,6 +156,30 @@ export async function getBankMeta() {
   } catch { return null; }
 }
 
+// Set the go-live cutoff (transactions on/before this date are never imported).
+export async function setImportCutoff(dateIso) {
+  if (!auth.currentUser) return;
+  await setDoc(bankMetaRef(), { importCutoffDate: dateIso }, { merge: true });
+}
+
+// Does a manually-entered transaction already look like this bank row? Same
+// (rounded) amount within a day either side, not itself an imported row.
+export async function findPossibleDuplicate(item) {
+  const amt = Math.round(Math.abs(Number(item.amount) || 0) * 100);
+  if (!amt || !item.date) return false;
+  const d = item.date;
+  const from = shiftDate(d, -1), to = shiftDate(d, 1);
+  const near = await db.transactions.where('date').between(from, to, true, true).toArray();
+  return near.some(t => t.source !== 'truelayer'
+    && Math.round(Math.abs(Number(t.amount) || 0) * 100) === amt);
+}
+
+function shiftDate(iso, days) {
+  const d = new Date(iso + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 export async function fetchPending() {
   if (!auth.currentUser) return [];
   const snap = await getDocs(query(importQueueRef(), where('status', '==', 'pending')));
@@ -218,14 +242,15 @@ export async function ignoreImport(id) {
 // ── Auto-accept pass ──────────────────────────────────────────────────────────
 // Import every fully-known item (high confidence, no note needed) automatically.
 // Returns the number accepted. Items needing review are left in the queue.
-export async function processAutoAccepts(pending, learnedRules) {
+export async function processAutoAccepts(pending, learnedRules, cutoff = null) {
   let accepted = 0;
   for (const item of pending) {
+    if (cutoff && item.date && item.date <= cutoff) continue;   // pre go-live
     const p = proposeForItem(item, learnedRules);
-    if (p.confidence === 'high' && !p.promptDetail) {
-      await confirmImport(item, { name: p.name, categoryId: p.categoryId });
-      accepted++;
-    }
+    if (p.confidence !== 'high' || p.promptDetail) continue;     // needs review
+    if (await findPossibleDuplicate(item)) continue;             // looks manual
+    await confirmImport(item, { name: p.name, categoryId: p.categoryId });
+    accepted++;
   }
   return accepted;
 }
