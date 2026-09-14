@@ -7298,7 +7298,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 11:31 BST (v83)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 11:59 BST (v84)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7504,9 +7504,10 @@ async function renderBankImport() {
     return `
     <div class="settings-card" style="margin:8px 12px;padding:12px${dup ? ';border:1.5px solid #e65100' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:baseline">
-        <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}</div>
+        <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}${item.bankStatus === 'pending' ? ' <span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:#1a73e8;background:#e8f0fe;border-radius:8px;padding:2px 6px;vertical-align:middle">PENDING</span>' : ''}</div>
         <div style="font-size:12px;color:var(--text-2)">${fmtDate(item.date)}</div>
       </div>
+      ${item.bankStatus === 'pending' ? `<div style="font-size:12px;color:var(--text-2);margin-top:4px">Still settling at the bank — the amount may change slightly; it's updated automatically once it posts.</div>` : ''}
       ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:4px">⚠️ Looks like a transaction you already logged — check before confirming.</div>` : ''}
       <div style="font-size:11px;color:var(--text-2);margin:2px 0 8px;word-break:break-word">${String(item.description || '').replace(/</g, '&lt;')}</div>
       <input class="form-input bi-desc" data-idx="${i}" value="${String(prefill).replace(/"/g, '&quot;')}" style="margin-bottom:8px">

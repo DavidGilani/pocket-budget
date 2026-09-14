@@ -80,6 +80,13 @@ db.version(9).stores({
   merchantRules: '++id, token',
 });
 
+// Pending card transactions: a `bankFingerprint` index so a pending import can
+// be reconciled with (and upgraded by) its later "booked" version instead of
+// creating a duplicate.
+db.version(10).stores({
+  transactions: '++id, date, categoryId, type, distributionId, syncStatus, bankTransactionId, bankFingerprint',
+});
+
 const SEED_CATEGORIES = [
   { id:1,  name:'Transportation',          icon:'🚗', colour:'#607D8B', isIncome:false, sortOrder:1,  isArchived:false, legacyId:24 },
   { id:2,  name:'Food / house shop',       icon:'🛒', colour:'#8D6E63', isIncome:false, sortOrder:2,  isArchived:false, legacyId:1  },

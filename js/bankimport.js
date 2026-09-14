@@ -210,23 +210,61 @@ export async function upsertLearnedRule(token, { name, categoryId }) {
   }
 }
 
+// Amount + cleaned-merchant fingerprint, used to reconcile a pending import with
+// its later booked version (and to catch same-status duplicates). Prefer the
+// tidier merchant_name; fall back to the raw descriptor.
+export function fingerprintFor(item) {
+  const pence = Math.round(Math.abs(Number(item.amount) || 0) * 100);
+  const tok = normaliseDescriptor(item.merchant || item.description || '')
+    .split(' ').filter(Boolean).slice(0, 2).join(' ');
+  return `${pence}:${tok}`;
+}
+
 // ── Creating the transaction ──────────────────────────────────────────────────
-// Idempotent: if a transaction already carries this bank id, we skip creating a
-// second one (belt-and-braces on top of the queue's own status).
+// Idempotent and pending-aware:
+//   • same bank id already imported            -> skip
+//   • booked row matches an imported pending    -> upgrade the pending in place
+//   • same fingerprint + same bank status       -> skip (re-seen pending / dup)
 export async function confirmImport(item, { name, categoryId, note }) {
   const raw = Number(item.amount) || 0;
   const isDebit = (item.bankType || '').toUpperCase() === 'DEBIT' || raw < 0;
   const signedAmount = isDebit ? -Math.abs(raw) : Math.abs(raw);
-
-  const dupe = await db.transactions.where('bankTransactionId').equals(String(item.bankTransactionId)).count();
-  if (dupe > 0) { await markImport(item.id, 'imported', { note: 'already existed' }); return null; }
-
+  const bankStatus = item.bankStatus || 'booked';
+  const bankId = item.bankTransactionId ? String(item.bankTransactionId) : null;
+  const fp = fingerprintFor(item);
   const now = new Date().toISOString();
+
+  if (bankId) {
+    const byId = await db.transactions.where('bankTransactionId').equals(bankId).count();
+    if (byId > 0) { await markImport(item.id, 'imported', { note: 'already existed' }); return null; }
+  }
+
+  const fpMatches = fp ? await db.transactions.where('bankFingerprint').equals(fp).toArray() : [];
+  if (fpMatches.length) {
+    const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending');
+    if (bankStatus === 'booked' && pendingMatch) {
+      // The pending charge has settled — update the existing transaction with the
+      // final amount/date/id rather than creating a second one. Keep the user's
+      // category and note.
+      await db.transactions.update(pendingMatch.id, {
+        amount: signedAmount, date: item.date, bankTransactionId: bankId,
+        bankFingerprint: fp, bankStatus: 'booked', updatedAt: now,
+      });
+      queueWrite('transactions', pendingMatch.id).catch(() => {});
+      await markImport(item.id, 'imported', { importedTxId: pendingMatch.id, reconciled: true });
+      return pendingMatch.id;
+    }
+    if (fpMatches.some(t => (t.bankStatus || 'booked') === bankStatus)) {
+      await markImport(item.id, 'imported', { note: 'duplicate fingerprint' });
+      return null;
+    }
+  }
+
   const txn = {
     date: item.date, amount: signedAmount, categoryId,
     note: (note != null ? note : name || '').trim(),
     type: isDebit ? 'expense' : 'income', distributionId: null,
-    bankTransactionId: String(item.bankTransactionId), source: 'truelayer',
+    bankTransactionId: bankId, bankFingerprint: fp, bankStatus, source: 'truelayer',
     createdAt: now, updatedAt: now, syncStatus: 'pending',
   };
   const txId = await db.transactions.add(txn);

@@ -48,42 +48,83 @@ async function api(path) {
 const cutoff = conn.data().importCutoffDate
   || (conn.data().connectedAt ? conn.data().connectedAt.slice(0, 10) : '0000-00-00');
 
+// A light fingerprint (amount + first words of the descriptor) used to give
+// pending rows a stable id and to match a pending row to its booked version.
+function fingerprint(t) {
+  const pence = Math.round(Math.abs(Number(t.amount) || 0) * 100);
+  const tok = (t.description || t.merchant_name || '')
+    .toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ').filter(Boolean).slice(0, 2).join(' ');
+  return `${pence}:${tok}`;
+}
+
 // 2. Cards on this consent.
 const cards = (await api('/data/v1/cards')).results || [];
 
-// 3. Transactions per card -> import queue.
+// 3. Transactions per card -> import queue (booked, then pending).
 const queue = ref.collection('importQueue');
-let seen = 0, queued = 0, skippedPreCutoff = 0;
+let seen = 0, queued = 0, skippedPreCutoff = 0, pendingQueued = 0;
+const bookedFingerprints = new Set();
+
+async function queueOne(t, card, bankStatus) {
+  const txDate = (t.timestamp || '').slice(0, 10);
+  if (txDate && txDate <= cutoff) { skippedPreCutoff++; return; }
+  const stableId = t.transaction_id || t.normalised_provider_transaction_id;
+  const docId = bankStatus === 'pending' ? `p_${stableId || fingerprint(t)}` : (stableId ? String(stableId) : '');
+  if (!docId || docId === 'p_') return;
+  seen++;
+  try {
+    await queue.doc(docId).create({
+      bankTransactionId: stableId ? String(stableId) : null,
+      bankStatus,                                  // 'booked' or 'pending'
+      fingerprint: fingerprint(t),
+      date: txDate,
+      amount: typeof t.amount === 'number' ? t.amount : Number(t.amount) || 0,
+      currency: t.currency || 'GBP',
+      description: t.description || '',
+      merchant: t.merchant_name || '',
+      bankType: t.transaction_type || '',          // DEBIT / CREDIT
+      bankCategory: t.transaction_category || '',   // TrueLayer's category hint
+      cardId: card.account_id,
+      source: 'truelayer',
+      status: 'pending',                            // review status (not bank status)
+      createdAt: new Date().toISOString(),
+    });
+    queued++;
+    if (bankStatus === 'pending') pendingQueued++;
+  } catch (e) {
+    if (!(e && (e.code === 6 || String(e.message).includes('ALREADY_EXISTS')))) throw e;
+  }
+}
 
 for (const card of cards) {
-  const txns = (await api(`/data/v1/cards/${card.account_id}/transactions`)).results || [];
-  for (const t of txns) {
-    seen++;
-    const txDate = (t.timestamp || '').slice(0, 10);
-    if (txDate && txDate <= cutoff) { skippedPreCutoff++; continue; }
-    const id = t.transaction_id || t.normalised_provider_transaction_id;
-    if (!id) continue;
-    try {
-      await queue.doc(String(id)).create({
-        bankTransactionId: String(id),
-        date: (t.timestamp || '').slice(0, 10),
-        amount: typeof t.amount === 'number' ? t.amount : Number(t.amount) || 0,
-        currency: t.currency || 'GBP',
-        description: t.description || '',
-        merchant: t.merchant_name || '',
-        bankType: t.transaction_type || '',        // DEBIT / CREDIT
-        bankCategory: t.transaction_category || '', // TrueLayer's category hint
-        cardId: card.account_id,
-        source: 'truelayer',
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      });
-      queued++;
-    } catch (e) {
-      // create() throws ALREADY_EXISTS for rows we've already queued or actioned
-      // — that's the dedupe, so swallow it. Re-throw anything else.
-      if (!(e && (e.code === 6 || String(e.message).includes('ALREADY_EXISTS')))) throw e;
-    }
+  const booked = (await api(`/data/v1/cards/${card.account_id}/transactions`)).results || [];
+  for (const t of booked) { bookedFingerprints.add(fingerprint(t)); }
+  for (const t of booked) { await queueOne(t, card, 'booked'); }
+
+  // Pending transactions give near-real-time visibility. Not every provider
+  // exposes them — ignore a plain not-available error, but let a consent
+  // failure (401/403) propagate so the reconnect flag is set.
+  let pending = [];
+  try {
+    pending = (await api(`/data/v1/cards/${card.account_id}/transactions/pending`)).results || [];
+  } catch (e) {
+    if (String(e.message).includes('Consent')) throw e;
+  }
+  for (const t of pending) {
+    if (bookedFingerprints.has(fingerprint(t))) continue;   // already settled
+    await queueOne(t, card, 'pending');
+  }
+}
+
+// Drop still-pending-review queue rows whose pending transaction has now
+// settled (a booked row with the same fingerprint exists), so it isn't offered
+// twice. Only touches rows the app hasn't actioned yet.
+let supersededPending = 0;
+const pendingRows = await queue.where('status', '==', 'pending').get();
+for (const d of pendingRows.docs) {
+  const data = d.data();
+  if (data.bankStatus === 'pending' && bookedFingerprints.has(data.fingerprint)) {
+    await d.ref.delete(); supersededPending++;
   }
 }
 
@@ -98,4 +139,4 @@ for (const d of pending.docs) {
 }
 
 await connDoc.set({ lastSyncAt: new Date().toISOString(), needsReconsent: false, lastError: null }, { merge: true });
-console.log(`Sync complete (${TL.env}). Cards: ${cards.length}; seen: ${seen}; newly queued: ${queued}; skipped pre-cutoff: ${skippedPreCutoff}; cleaned stale: ${cleaned}.`);
+console.log(`Sync complete (${TL.env}). Cards: ${cards.length}; seen: ${seen}; newly queued: ${queued} (pending: ${pendingQueued}); skipped pre-cutoff: ${skippedPreCutoff}; cleaned stale: ${cleaned}; superseded pending: ${supersededPending}.`);
