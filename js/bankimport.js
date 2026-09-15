@@ -196,10 +196,24 @@ export function cutoffFrom(meta) {
 // single source of truth for the badge, the review screen and auto-accept, so
 // they can never disagree about what's outstanding.
 export async function fetchReviewable() {
-  const [meta, pending] = await Promise.all([getBankMeta(), fetchPending()]);
+  const [meta, pending, ignoreRules] = await Promise.all([getBankMeta(), fetchPending(), loadIgnoreRules()]);
   const cutoff = cutoffFrom(meta);
-  const items = cutoff ? pending.filter(i => (i.date || '') > cutoff) : pending;
-  return { meta, cutoff, items, hidden: pending.length - items.length };
+  const afterCutoff = cutoff ? pending.filter(i => (i.date || '') > cutoff) : pending;
+  const items = ignoreRules.length
+    ? afterCutoff.filter(i => {
+        const norm = normaliseDescriptor(i.merchant || i.description || '');
+        return !ignoreRules.some(r => r.token && norm.includes(r.token));
+      })
+    : afterCutoff;
+  // `hidden` reflects only pre-cutoff rows (used for the "older transactions
+  // hidden" note); ignored merchants are silently dropped.
+  return { meta, cutoff, items, hidden: pending.length - afterCutoff.length };
+}
+
+// Mark a queue row as imported (used when a distribution is created from an
+// import, which bypasses confirmImport).
+export async function markImported(id, importedTxId) {
+  await markImport(id, 'imported', importedTxId != null ? { importedTxId } : {});
 }
 
 // Ask the secure trigger (Cloudflare Worker) to run the bank pull now. The
@@ -227,7 +241,24 @@ async function markImport(id, status, extra = {}) {
 
 // ── Learned rules ─────────────────────────────────────────────────────────────
 export async function loadLearnedRules() {
-  try { return await db.merchantRules.toArray(); } catch { return []; }
+  try { return (await db.merchantRules.toArray()).filter(r => !r.ignore); } catch { return []; }
+}
+
+export async function loadIgnoreRules() {
+  try { return (await db.merchantRules.toArray()).filter(r => r.ignore); } catch { return []; }
+}
+
+// Remember a merchant to always auto-ignore (future charges never surface).
+export async function addIgnoreRule(token, label) {
+  if (!token) return;
+  const existing = await db.merchantRules.where('token').equals(token).first();
+  if (existing) {
+    await db.merchantRules.update(existing.id, { ignore: true, name: label || existing.name });
+    queueWrite('merchantRules', existing.id).catch(() => {});
+  } else {
+    const id = await db.merchantRules.add({ token, ignore: true, name: label || '', createdAt: new Date().toISOString() });
+    queueWrite('merchantRules', id).catch(() => {});
+  }
 }
 
 export async function upsertLearnedRule(token, { name, categoryId }) {

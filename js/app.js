@@ -5,7 +5,7 @@ import { fmt, fmtDate, fmtDateShort, dayName, today, isoDate, addDays, diffDays,
 import { calcRollingBalance, calcProjectedBalances, getCurrentCycle, getCycleForDate, calcDailyAllowance, getCycleBreakdown, generateDistributionChildren, getSavingsTarget } from './engine.js';
 import { signInWithGoogle, handleRedirectResult, signOutUser, auth } from './firebase.js';
 import { initSync, queueWrite, queueDelete, syncState, onSync, pullFromFirestore, uploadAllToFirestore, flushSyncQueue, getPendingSyncCount, downloadAllFromCloud, getCloudCounts, pingFirestore, getLastUploadReport } from './sync.js';
-import { fetchReviewable, proposeForItem, confirmImport, ignoreImport, loadLearnedRules, upsertLearnedRule, processAutoAccepts, isAutoAcceptOn, setImportCutoff, findPossibleDuplicate, requestBankPullNow } from './bankimport.js';
+import { fetchReviewable, proposeForItem, confirmImport, ignoreImport, loadLearnedRules, upsertLearnedRule, processAutoAccepts, isAutoAcceptOn, setImportCutoff, findPossibleDuplicate, requestBankPullNow, addIgnoreRule, fingerprintFor, markImported } from './bankimport.js';
 
 const state = {
   view: 'balance',
@@ -377,7 +377,8 @@ async function populateBalanceReviewStack() {
   host.querySelector('#bal-rev-edit').onclick = () => openBankReviewSheet(() => populateBalanceReviewStack());
 }
 
-async function openEntry(type, existingTxn = null, existingDist = null, forceDistribute = false) {
+async function openEntry(type, existingTxn = null, existingDist = null, forceDistribute = false, importItem = null) {
+  state.entryImportItem = importItem;   // link to a card import, if any
   if (existingDist) type = existingDist.isIncome ? 'income' : 'expense';
   state.entryType = type;
   state.entryPence = existingDist ? Math.round(Math.abs(existingDist.totalAmount) * 100)
@@ -730,6 +731,7 @@ async function refreshAfterEntry() {
   else if (state.view === 'transactions') await renderTransactions();
   else if (state.view === 'distributions') await renderDistributions();
   else if (state.view === 'extraIncomes') await renderExtraIncomes();
+  else if (state.view === 'bankImport') await renderBankImport();
 }
 
 async function saveEntry(overlay) {
@@ -761,6 +763,14 @@ async function saveEntry(overlay) {
       await db.transactions.delete(state.entryEditId);
       queueDelete('transactions', state.entryEditId).catch(() => {});
     }
+    // If this came from a card import, stamp the distribution so it's traceable
+    // and won't be re-imported.
+    if (state.entryImportItem) {
+      const it = state.entryImportItem;
+      distData.bankTransactionId = it.bankTransactionId ? String(it.bankTransactionId) : null;
+      distData.bankFingerprint = fingerprintFor(it);
+      distData.bankStatus = it.bankStatus || 'booked';
+    }
     let distId;
     if (state.entryDistId) { await db.distributions.update(state.entryDistId, distData); distId = state.entryDistId; }
     else { distId = await db.distributions.add(distData); }
@@ -768,6 +778,7 @@ async function saveEntry(overlay) {
     const children = generateDistributionChildren({ ...distData, id: distId });
     await db.transactions.bulkAdd(children);
     // Children are regenerated locally on every device — not queued for upload.
+    if (state.entryImportItem) { await markImported(state.entryImportItem.id, distId); state.entryImportItem = null; }
     showToast(state.entryDistId ? 'Updated' : `Created ${children.length} daily entries`);
   } else {
     // Save as a single transaction
@@ -784,6 +795,14 @@ async function saveEntry(overlay) {
       note: (state.entryNote || '').trim(), type: state.entryType, distributionId: null,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), syncStatus: 'pending',
     };
+    // Stamp bank fields if this single transaction came from a card import.
+    if (state.entryImportItem) {
+      const it = state.entryImportItem;
+      txn.bankTransactionId = it.bankTransactionId ? String(it.bankTransactionId) : null;
+      txn.bankFingerprint = fingerprintFor(it);
+      txn.bankStatus = it.bankStatus || 'booked';
+      txn.source = 'truelayer';
+    }
     if (state.entryEditId) {
       await db.transactions.update(state.entryEditId, { ...txn, updatedAt: new Date().toISOString() });
       queueWrite('transactions', state.entryEditId).catch(() => {});
@@ -791,6 +810,7 @@ async function saveEntry(overlay) {
     } else {
       const newId = await db.transactions.add(txn);
       queueWrite('transactions', newId).catch(() => {});
+      if (state.entryImportItem) { await markImported(state.entryImportItem.id, newId); state.entryImportItem = null; }
       showToast('Saved');
     }
   }
@@ -7350,7 +7370,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 15 Sep 2026 at 12:29 BST (v87)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 15 Sep 2026 at 13:38 BST (v88)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7644,6 +7664,10 @@ function bankReviewCardHTML({ item, p, i, dup }, catMap) {
         <button class="btn bi-ignore" data-idx="${i}" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text-2)">Ignore</button>
         <button class="btn btn-primary bi-confirm" data-idx="${i}" style="flex:2">Confirm</button>
       </div>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:8px">
+        <button class="bi-distribute" data-idx="${i}" style="background:none;border:none;color:#1a73e8;font-size:12px;font-weight:600;cursor:pointer;padding:2px 0">📅 Distribute over days</button>
+        <button class="bi-always-ignore" data-idx="${i}" style="background:none;border:none;color:var(--text-2);font-size:12px;cursor:pointer;padding:2px 0">Always ignore this merchant</button>
+      </div>
     </div>`;
 }
 
@@ -7679,6 +7703,27 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
   root.querySelectorAll('.bi-ignore').forEach(btn => btn.onclick = async () => {
     await ignoreImport(rows[Number(btn.dataset.idx)].item.id);
     showToast('Ignored');
+    afterAction();
+  });
+
+  root.querySelectorAll('.bi-distribute').forEach(btn => btn.onclick = () => {
+    const i = Number(btn.dataset.idx);
+    const { item, p } = rows[i];
+    const desc = (root.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim() || p.name;
+    const categoryId = chosenCat[i] ?? p.categoryId;
+    // Close the review sheet (if this card is in one) so the entry editor is
+    // unobstructed, then open it in distribute mode linked to this import.
+    root.closest('.sheet-overlay')?.remove();
+    openEntry(p.isDebit ? 'expense' : 'income',
+      { amount: p.signedAmount, categoryId, note: desc, date: item.date }, null, true, item);
+  });
+
+  root.querySelectorAll('.bi-always-ignore').forEach(btn => btn.onclick = async () => {
+    const { item, p } = rows[Number(btn.dataset.idx)];
+    if (!confirm(`Always ignore transactions from "${p.name}"? They won't be imported in future.`)) return;
+    await addIgnoreRule(p.token, p.name);
+    await ignoreImport(item.id);
+    showToast('Will always ignore ' + p.name);
     afterAction();
   });
 }
