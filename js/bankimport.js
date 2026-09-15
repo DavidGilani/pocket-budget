@@ -271,7 +271,21 @@ export async function confirmImport(item, { name, categoryId, note }) {
     if (byId > 0) { await markImport(item.id, 'imported', { note: 'already existed' }); return null; }
   }
 
-  const fpMatches = fp ? await db.transactions.where('bankFingerprint').equals(fp).toArray() : [];
+  let fpMatches = fp ? await db.transactions.where('bankFingerprint').equals(fp).toArray() : [];
+
+  // Fallback for a settling charge whose merchant text drifted between pending
+  // and booked (so the fingerprints differ): a booked row will still adopt an
+  // imported *pending* row of the same amount within a few days. Restricting to
+  // pending rows keeps this safe — a pending charge is, by definition, awaiting
+  // its booked twin.
+  if (bankStatus === 'booked' && !fpMatches.some(t => t.bankStatus === 'pending')) {
+    const absPence = Math.round(Math.abs(raw) * 100);
+    const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
+    const twin = near.find(t => t.bankStatus === 'pending'
+      && Math.round(Math.abs(Number(t.amount) || 0) * 100) === absPence);
+    if (twin) fpMatches = [twin, ...fpMatches];
+  }
+
   if (fpMatches.length) {
     const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending');
     if (bankStatus === 'booked' && pendingMatch) {

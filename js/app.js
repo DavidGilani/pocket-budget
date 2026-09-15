@@ -254,7 +254,7 @@ async function renderBalance() {
   }
 
   viewContainer.innerHTML = `
-    <div class="balance-screen ${todayBal < 0 ? 'negative' : ''}">
+    <div class="balance-screen ${todayBal < 0 ? 'negative' : ''}" style="position:relative">
       ${pendingCount > 0 ? `<div class="sync-banner">${pendingCount} change${pendingCount > 1 ? 's' : ''} pending sync</div>` : ''}
       ${wealthBanner}
       <div class="balance-header">
@@ -299,6 +299,7 @@ async function renderBalance() {
         <button class="fab fab-income" id="fab-income" aria-label="Add income">+</button>
         <button class="fab fab-expense" id="fab-expense" aria-label="Add expense">-</button>
       </div>
+      <div id="bal-review-host" style="position:absolute;left:0;right:0;bottom:18px;padding:0 16px;pointer-events:none"></div>
     </div>
   `;
 
@@ -323,6 +324,57 @@ async function renderBalance() {
   viewContainer.querySelector('#balance-cycle-btn').onclick = () => navigate('breakdown');
   const wealthBannerBtn = viewContainer.querySelector('#wealth-banner-btn');
   if (wealthBannerBtn) wealthBannerBtn.onclick = () => navigate('netWealth');
+
+  populateBalanceReviewStack();
+}
+
+// Stacked review cards on the Balance page: card transactions that weren't
+// auto-confirmed, shown as a small stack you can confirm/ignore in place (or
+// tap to edit fully). Fills the #bal-review-host overlay after render.
+async function populateBalanceReviewStack() {
+  const host = viewContainer.querySelector('#bal-review-host');
+  if (!host) return;
+  const [{ items }, learned] = await Promise.all([fetchReviewable(), loadLearnedRules()]);
+  if (!items.length) { host.innerHTML = ''; return; }
+
+  const allCats = await db.categories.toArray();
+  const catMap = Object.fromEntries(allCats.map(c => [c.id, c]));
+  const front = items[0];
+  const p = proposeForItem(front, learned);
+  const dup = await findPossibleDuplicate(front);
+  const cat = catMap[p.categoryId];
+  const more = items.length - 1;
+
+  host.style.pointerEvents = 'auto';
+  host.innerHTML = `
+    ${more > 0 ? `<div style="height:8px;margin:0 10px;border-radius:12px 12px 0 0;background:var(--card);opacity:.5;box-shadow:0 -1px 4px rgba(0,0,0,.08)"></div>` : ''}
+    <div style="background:var(--card);border-radius:14px;box-shadow:0 4px 18px rgba(0,0,0,.16);padding:12px 14px;${dup ? 'border:1.5px solid #e65100' : ''}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:20px">💳</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:15px;color:var(--text)">${fmt(Math.abs(p.signedAmount))} · ${String(p.name).replace(/</g, '&lt;')}${front.bankStatus === 'pending' ? ' <span style="font-size:9px;font-weight:700;color:#1a73e8;background:#e8f0fe;border-radius:6px;padding:1px 5px;vertical-align:middle">PENDING</span>' : ''}</div>
+          <div style="font-size:12px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${cat ? cat.icon + ' ' + cat.name : 'Uncategorised'} · ${fmtDate(front.date)}${more > 0 ? ` · +${more} more` : ''}</div>
+        </div>
+      </div>
+      ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:6px">⚠️ Might already be logged — tap Edit to check.</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button id="bal-rev-ignore" class="btn" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text-2);padding:8px">Ignore</button>
+        <button id="bal-rev-edit" class="btn" style="flex:1;background:transparent;border:1.5px solid var(--border);color:var(--text);padding:8px">Edit</button>
+        <button id="bal-rev-confirm" class="btn btn-primary" style="flex:1.4;padding:8px">Confirm</button>
+      </div>
+    </div>`;
+
+  host.querySelector('#bal-rev-confirm').onclick = async () => {
+    if (dup && !confirm('This looks like a transaction you already logged manually. Add it anyway?')) return;
+    await confirmImport(front, { name: p.name, categoryId: p.categoryId, note: p.name });
+    await upsertLearnedRule(p.token, { name: p.name, categoryId: p.categoryId });
+    populateBalanceReviewStack();
+  };
+  host.querySelector('#bal-rev-ignore').onclick = async () => {
+    await ignoreImport(front.id);
+    populateBalanceReviewStack();
+  };
+  host.querySelector('#bal-rev-edit').onclick = () => openBankReviewSheet(() => populateBalanceReviewStack());
 }
 
 async function openEntry(type, existingTxn = null, existingDist = null, forceDistribute = false) {
@@ -834,7 +886,6 @@ async function renderTransactions() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </span>
       </button>` : `<div style="padding:8px 16px;font-size:13px;color:var(--text-2);background:var(--card);border-bottom:1px solid var(--border)">Searching all transactions (${txns.length} found)</div>`}
-      <div id="txn-review-prompt"></div>
       <div class="search-bar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" id="txn-search" placeholder="Search transactions..." value="${state.txnSearchQuery}" style="flex:1;border:none;outline:none;font-size:15px;background:none" autocomplete="off" autocorrect="off" autocapitalize="off">
@@ -884,21 +935,6 @@ async function renderTransactions() {
 
   const txnScreen = viewContainer.querySelector('.transactions-screen');
   txnScreen.querySelector('#txn-add-btn').onclick = () => openEntry('expense');
-
-  // Prompt to review card transactions that weren't auto-confirmed, without
-  // going into Settings. Filled lazily so it never blocks the list render.
-  fetchReviewable().then(({ items }) => {
-    const host = viewContainer.querySelector('#txn-review-prompt');
-    if (!host || !items.length) return;
-    const n = items.length;
-    host.innerHTML = `
-      <button id="txn-review-btn" style="display:flex;align-items:center;gap:10px;width:100%;padding:12px 16px;border:none;border-bottom:1px solid var(--border);background:#e8f0fe;color:#1a3d7c;cursor:pointer;text-align:left">
-        <span style="font-size:18px">💳</span>
-        <span style="flex:1;font-size:14px;font-weight:600">${n} card transaction${n === 1 ? '' : 's'} to review</span>
-        <span style="font-size:13px;color:#1a73e8;font-weight:600">Review ›</span>
-      </button>`;
-    host.querySelector('#txn-review-btn').onclick = () => openBankReviewSheet(() => renderTransactions());
-  }).catch(() => {});
   let _searchTimer;
   txnScreen.querySelector('#txn-search').addEventListener('input', e => {
     state.txnSearchQuery = e.target.value;
@@ -7314,7 +7350,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 14 Sep 2026 at 18:19 BST (v86)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 15 Sep 2026 at 12:29 BST (v87)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
