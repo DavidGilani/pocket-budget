@@ -180,6 +180,21 @@ function shiftDate(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Is this booked row the settled version of an already-imported PENDING
+// transaction? Matches on fingerprint, or on amount + date within a few days
+// (covering merchant-text drift). Mirrors confirmImport's reconcile test.
+export async function hasPendingTwin(item) {
+  const fp = fingerprintFor(item);
+  if (fp) {
+    const byFp = await db.transactions.where('bankFingerprint').equals(fp).toArray();
+    if (byFp.some(t => t.bankStatus === 'pending')) return true;
+  }
+  const absPence = Math.round(Math.abs(Number(item.amount) || 0) * 100);
+  if (!absPence || !item.date) return false;
+  const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
+  return near.some(t => t.bankStatus === 'pending' && Math.round(Math.abs(Number(t.amount) || 0) * 100) === absPence);
+}
+
 export async function fetchPending() {
   if (!auth.currentUser) return [];
   const snap = await getDocs(query(importQueueRef(), where('status', '==', 'pending')));
@@ -196,17 +211,33 @@ export function cutoffFrom(meta) {
 // single source of truth for the badge, the review screen and auto-accept, so
 // they can never disagree about what's outstanding.
 export async function fetchReviewable() {
-  const [meta, pending, ignoreRules] = await Promise.all([getBankMeta(), fetchPending(), loadIgnoreRules()]);
+  const [meta, pending, ignoreRules, learned] = await Promise.all([
+    getBankMeta(), fetchPending(), loadIgnoreRules(), loadLearnedRules(),
+  ]);
   const cutoff = cutoffFrom(meta);
   const afterCutoff = cutoff ? pending.filter(i => (i.date || '') > cutoff) : pending;
-  const items = ignoreRules.length
-    ? afterCutoff.filter(i => {
-        const norm = normaliseDescriptor(i.merchant || i.description || '');
-        return !ignoreRules.some(r => r.token && norm.includes(r.token));
-      })
-    : afterCutoff;
+
+  // Auto-settle duplicates: a booked row that is the settled version of an
+  // already-imported PENDING transaction (same amount + date, previously
+  // pending) is reconciled in place and never shown — regardless of the
+  // auto-accept setting or the merchant being "needs detail".
+  const settled = new Set();
+  for (const it of afterCutoff) {
+    if ((it.bankStatus || 'booked') === 'booked' && await hasPendingTwin(it)) {
+      await confirmImport(it, proposeForItem(it, learned)); // reconcile branch
+      settled.add(it.id);
+    }
+  }
+
+  let items = afterCutoff.filter(i => !settled.has(i.id));
+  if (ignoreRules.length) {
+    items = items.filter(i => {
+      const norm = normaliseDescriptor(i.merchant || i.description || '');
+      return !ignoreRules.some(r => r.token && norm.includes(r.token));
+    });
+  }
   // `hidden` reflects only pre-cutoff rows (used for the "older transactions
-  // hidden" note); ignored merchants are silently dropped.
+  // hidden" note); ignored/settled rows are silently dropped.
   return { meta, cutoff, items, hidden: pending.length - afterCutoff.length };
 }
 

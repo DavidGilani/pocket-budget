@@ -7370,7 +7370,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 15 Sep 2026 at 13:38 BST (v88)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 17 Sep 2026 at 12:37 BST (v89)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
