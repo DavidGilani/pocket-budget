@@ -4075,10 +4075,14 @@ async function computeMortgageProjection() {
   //     `mtgStdSplitRich` (Rich's % of the regular payment) → A (Rich) / C (David)
   //   • overpayments      — each logged overpayment's own Rich/David split, for
   //     overpayments dated after the baseline → B (Rich) / D (David)
-  //   • Rich's share of contributions since = (A+B) / (A+B+C+D)
-  // The actual principal paid down since the baseline (baseline balance − current
-  // balance from the latest snapshot) is apportioned by that share, expressed as a
-  // % of the *original* property value, and added to the banked equity %.
+  // Equity is split by PRINCIPAL contributed, not gross payments: overpayments
+  // are 100% principal, so they count in full, while regular payments only count
+  // for their principal share of the actual paydown. Since the real paydown P is
+  // known (baseline balance − current balance) and overpayments B+D are known to
+  // be pure principal, the regular-payment principal is just the remainder
+  // (P − B − D), split by the regular-payment ratio (= stdSplitRich). Each
+  // person's principal = their overpayments + their share of that remainder,
+  // expressed as a % of the *original* property value and added to the baseline.
   const baselineDate = baseDateRaw || null;
   const stdSplitRich = Math.min(100, Math.max(0, Number(stdSplitRichRaw ?? 50) || 0));
   const originalValue = Number(origValRaw) || 450000;
@@ -4103,16 +4107,28 @@ async function computeMortgageProjection() {
   const B = overSince.reduce((s, o) => s + (Number(o.richAmount) || 0), 0);  // Rich, overpayments
   const D = overSince.reduce((s, o) => s + (Number(o.myAmount) || 0), 0);    // David, overpayments
 
-  const contribTotalSince = A + B + C + D;
-  const richProp = contribTotalSince > 0 ? (A + B) / contribTotalSince : 0;   // 0..1
-
   // Principal actually paid down since the baseline. X = current mortgage balance
   // from the latest snapshot; only counts if that snapshot is newer than the
   // baseline (otherwise there's no post-baseline paydown to apportion yet).
   const currentBalance = anchorPrincipal;
   const paydownSince = (baselineDate && anchorDate > baselineDate)
     ? Math.max(0, baselineBalance - currentBalance) : 0;
-  const richNetContribSince = paydownSince * richProp;                 // £
+
+  // Split the paydown by principal contributed (overpayments count in full).
+  const over = B + D;
+  let richNetContribSince;                                              // £ (Rich's principal)
+  if (over <= paydownSince) {
+    const regPrincipal = paydownSince - over;                          // principal from regular payments
+    richNetContribSince = B + regPrincipal * (stdSplitRich / 100);
+  } else {
+    // Overpayments exceed the measured paydown (e.g. a stale balance): floor the
+    // regular-payment principal at zero and split the paydown between the two
+    // overpayment pots.
+    richNetContribSince = over > 0 ? paydownSince * (B / over) : 0;
+  }
+  richNetContribSince = Math.max(0, Math.min(richNetContribSince, paydownSince));
+
+  const richProp = paydownSince > 0 ? richNetContribSince / paydownSince : 0;   // Rich's share of the paydown
   const equityEarnedPct = originalValue > 0 ? richNetContribSince / originalValue * 100 : 0;  // Y%
   const richTotalEquityPct = baselineEquityPct + equityEarnedPct;
   const richOwnsValue = valuation * richTotalEquityPct / 100;
@@ -4267,7 +4283,7 @@ async function renderMortgageFree() {
       <div class="settings-row">
         <div style="flex:1;min-width:0">
           <div style="font-size:14px">Contributions since baseline</div>
-          <div style="font-size:12px;color:var(--text-2)">Rich ${pct2(propShareRich)} of the total · ${eq.monthsSince} mo regular + ${eq.overSinceCount} overpayment${eq.overSinceCount === 1 ? '' : 's'}</div>
+          <div style="font-size:12px;color:var(--text-2)">Rich funded ${pct2(propShareRich)} of the paydown (overpayments count in full) · ${eq.monthsSince} mo regular + ${eq.overSinceCount} overpayment${eq.overSinceCount === 1 ? '' : 's'}</div>
         </div>
       </div>
       <div class="settings-row">
@@ -7370,7 +7386,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 17 Sep 2026 at 12:37 BST (v89)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 17 Sep 2026 at 12:54 BST (v90)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
