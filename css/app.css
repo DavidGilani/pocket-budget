@@ -241,6 +241,17 @@ html, body {
 .fab:active { transform: scale(0.92); background: rgba(255,255,255,0.25); }
 .fab.fab-income { border-color: rgba(255,255,255,0.8); }
 
+/* Smaller central "pull from bank" refresh button between + and - */
+.fab.fab-refresh {
+  width: 48px;
+  height: 48px;
+  align-self: center;
+  border-color: rgba(255,255,255,0.55);
+}
+.fab.fab-refresh svg { width: 22px; height: 22px; }
+.fab.fab-refresh.spinning svg { animation: fab-spin 0.9s linear infinite; }
+@keyframes fab-spin { to { transform: rotate(360deg); } }
+
 .sync-banner {
   background: rgba(0,0,0,0.2);
   color: white;

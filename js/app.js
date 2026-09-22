@@ -297,6 +297,13 @@ async function renderBalance() {
 
       <div class="balance-fabs">
         <button class="fab fab-income" id="fab-income" aria-label="Add income">+</button>
+        <button class="fab fab-refresh" id="fab-refresh" aria-label="Refresh transactions from bank">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+        </button>
         <button class="fab fab-expense" id="fab-expense" aria-label="Add expense">-</button>
       </div>
       <div id="bal-review-host" style="position:absolute;left:0;right:0;bottom:18px;padding:0 16px;pointer-events:none"></div>
@@ -320,6 +327,21 @@ async function renderBalance() {
 
   viewContainer.querySelector('#fab-income').onclick = () => openEntry('income');
   viewContainer.querySelector('#fab-expense').onclick = () => openEntry('expense');
+  const refreshFab = viewContainer.querySelector('#fab-refresh');
+  if (refreshFab) refreshFab.onclick = async () => {
+    if (refreshFab.classList.contains('spinning')) return;
+    refreshFab.classList.add('spinning');
+    try {
+      await requestBankPullNow();
+      showToast('Pull started — new spend appears in ~1–2 min');
+      // The GitHub job takes about a minute; re-check automatically.
+      setTimeout(() => { if (state.view === 'balance') renderBalance(); }, 90000);
+    } catch (e) {
+      showToast('Pull failed: ' + e.message);
+    } finally {
+      setTimeout(() => refreshFab.classList.remove('spinning'), 1500);
+    }
+  };
   viewContainer.querySelector('#balance-menu-btn').onclick = () => navigate('settings');
   viewContainer.querySelector('#balance-cycle-btn').onclick = () => navigate('breakdown');
   const wealthBannerBtn = viewContainer.querySelector('#wealth-banner-btn');
@@ -7386,7 +7408,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 22 Sep 2026 at 18:17 BST (v91)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 22 Sep 2026 at 18:23 BST (v92)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
