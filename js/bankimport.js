@@ -352,10 +352,13 @@ export async function confirmImport(item, { name, categoryId, note }) {
     const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending');
     if (bankStatus === 'booked' && pendingMatch) {
       // The pending charge has settled — update the existing transaction with the
-      // final amount/date/id rather than creating a second one. Keep the user's
-      // category and note.
+      // final amount/id rather than creating a second one. Keep the user's
+      // category and note, and keep the EARLIER date: the pending row carries the
+      // day the spend was actually made, while the booked row's date is often the
+      // later day it settled/processed. We want the spend date.
+      const spendDate = [pendingMatch.date, item.date].filter(Boolean).sort()[0] || item.date;
       await db.transactions.update(pendingMatch.id, {
-        amount: signedAmount, date: item.date, bankTransactionId: bankId,
+        amount: signedAmount, date: spendDate, bankTransactionId: bankId,
         bankFingerprint: fp, bankStatus: 'booked', updatedAt: now,
       });
       queueWrite('transactions', pendingMatch.id).catch(() => {});
