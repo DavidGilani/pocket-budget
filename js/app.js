@@ -7408,7 +7408,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 22 Sep 2026 at 18:23 BST (v92)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 23 Sep 2026 at 16:40 BST (v93)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7695,6 +7695,10 @@ function bankReviewCardHTML({ item, p, i, dup }, catMap) {
       ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:4px">⚠️ Looks like a transaction you already logged — check before confirming.</div>` : ''}
       <div style="font-size:11px;color:var(--text-2);margin:2px 0 8px;word-break:break-word">${String(item.description || '').replace(/</g, '&lt;')}</div>
       <input class="form-input bi-desc" data-idx="${i}" value="${String(prefill).replace(/"/g, '&quot;')}" style="margin-bottom:8px">
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <button class="bi-type" data-idx="${i}" data-type="expense" style="flex:1;padding:7px;border-radius:8px;border:1.5px solid var(--border);cursor:pointer;font-size:13px;${p.isDebit ? 'background:#1a73e8;color:#fff;font-weight:600' : 'background:transparent;color:var(--text-2)'}">Cost</button>
+        <button class="bi-type" data-idx="${i}" data-type="income" style="flex:1;padding:7px;border-radius:8px;border:1.5px solid var(--border);cursor:pointer;font-size:13px;${!p.isDebit ? 'background:#43a047;color:#fff;font-weight:600' : 'background:transparent;color:var(--text-2)'}">Income</button>
+      </div>
       <button class="bi-cat" data-idx="${i}" style="width:100%;text-align:left;padding:9px 10px;border:1.5px solid var(--border);border-radius:8px;background:transparent;cursor:pointer">
         <span class="bi-cat-label">${cat ? cat.icon + ' ' + cat.name : 'Choose category'}</span>
       </button>
@@ -7712,12 +7716,39 @@ function bankReviewCardHTML({ item, p, i, dup }, catMap) {
 // Wire category-pick / confirm / ignore for review cards inside `root`.
 // `afterAction` is called after each confirm/ignore so the caller can re-render.
 function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
-  const chosenCat = {};
-  rows.forEach(({ p, i }) => { chosenCat[i] = p.categoryId; });
+  const all = Object.values(catMap);
+  const expenseCats = all.filter(c => !c.isIncome && !c.isArchived).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const incomeCats = all.filter(c => c.isIncome && !c.isArchived).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const incomeDefault = (incomeCats.find(c => c.id === 13) || incomeCats[0])?.id ?? null;
+
+  const chosenCat = {}, chosenType = {};
+  rows.forEach(({ p, i }) => {
+    chosenType[i] = p.isDebit ? 'expense' : 'income';
+    chosenCat[i] = p.isDebit ? p.categoryId : incomeDefault;
+  });
+
+  root.querySelectorAll('.bi-type').forEach(btn => btn.onclick = () => {
+    const i = Number(btn.dataset.idx);
+    const t = btn.dataset.type;
+    if (chosenType[i] === t) return;
+    chosenType[i] = t;
+    chosenCat[i] = t === 'expense' ? (rows[i].p.isDebit ? rows[i].p.categoryId : 28) : incomeDefault;
+    root.querySelectorAll(`.bi-type[data-idx="${i}"]`).forEach(b => {
+      const active = b.dataset.type === t;
+      const activeBg = b.dataset.type === 'income' ? '#43a047' : '#1a73e8';
+      b.style.background = active ? activeBg : 'transparent';
+      b.style.color = active ? '#fff' : 'var(--text-2)';
+      b.style.fontWeight = active ? '600' : '400';
+    });
+    const cm = catMap[chosenCat[i]];
+    const lbl = root.querySelector(`.bi-cat[data-idx="${i}"] .bi-cat-label`);
+    if (lbl) lbl.textContent = cm ? `${cm.icon} ${cm.name}` : 'Choose category';
+  });
 
   root.querySelectorAll('.bi-cat').forEach(btn => btn.onclick = () => {
     const idx = btn.dataset.idx;
-    openCategoryPicker(cats, chosenCat[idx], (catId, name, icon) => {
+    const list = chosenType[idx] === 'income' ? incomeCats : expenseCats;
+    openCategoryPicker(list, chosenCat[idx], (catId, name, icon) => {
       chosenCat[idx] = catId;
       btn.querySelector('.bi-cat-label').textContent = `${icon} ${name}`;
     });
@@ -7729,11 +7760,14 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
     if (dup && !confirm('This looks like a transaction you already logged manually. Add it anyway?')) return;
     const desc = (root.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim();
     const categoryId = chosenCat[i] ?? p.categoryId;
-    await confirmImport(item, { name: p.name, categoryId, note: desc });
-    // Teach the rules engine: base name (before any " – detail") + category, so
-    // this merchant auto-fills (and can auto-accept) next time.
-    const learnName = (desc.split('–')[0] || p.name).trim() || p.name;
-    await upsertLearnedRule(p.token, { name: learnName, categoryId });
+    const type = chosenType[i];
+    await confirmImport(item, { name: p.name, categoryId, note: desc, type });
+    // Teach the rules engine for costs only — learning a category from an
+    // occasional refund would wrongly file the merchant's future purchases.
+    if (type === 'expense') {
+      const learnName = (desc.split('–')[0] || p.name).trim() || p.name;
+      await upsertLearnedRule(p.token, { name: learnName, categoryId });
+    }
     showToast('Added to transactions');
     afterAction();
   });
@@ -7748,12 +7782,13 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
     const i = Number(btn.dataset.idx);
     const { item, p } = rows[i];
     const desc = (root.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim() || p.name;
+    const type = chosenType[i];
     const categoryId = chosenCat[i] ?? p.categoryId;
+    const signed = type === 'expense' ? -Math.abs(p.signedAmount) : Math.abs(p.signedAmount);
     // Close the review sheet (if this card is in one) so the entry editor is
     // unobstructed, then open it in distribute mode linked to this import.
     root.closest('.sheet-overlay')?.remove();
-    openEntry(p.isDebit ? 'expense' : 'income',
-      { amount: p.signedAmount, categoryId, note: desc, date: item.date }, null, true, item);
+    openEntry(type, { amount: signed, categoryId, note: desc, date: item.date }, null, true, item);
   });
 
   root.querySelectorAll('.bi-always-ignore').forEach(btn => btn.onclick = async () => {

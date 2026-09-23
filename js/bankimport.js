@@ -103,12 +103,22 @@ function titleCase(s) {
     .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
+// Cost or income? The bank's transaction_type is authoritative: DEBIT is a
+// cost, CREDIT (a refund or payment) is income. Only fall back to the amount
+// sign when the type is missing — on a credit card the sign alone is ambiguous.
+export function deriveIsDebit(item) {
+  const type = (item.bankType || '').toUpperCase();
+  if (type === 'DEBIT') return true;
+  if (type === 'CREDIT') return false;
+  return (Number(item.amount) || 0) < 0;
+}
+
 // ── Proposal ──────────────────────────────────────────────────────────────────
 // Given a queue item and the learned rules, return the suggested name, category,
 // whether it needs a note, a confidence level, and the derived amount fields.
 export function proposeForItem(item, learnedRules = []) {
   const raw = Number(item.amount) || 0;
-  const isDebit = (item.bankType || '').toUpperCase() === 'DEBIT' || raw < 0;
+  const isDebit = deriveIsDebit(item);
   const absAmount = Math.abs(raw);
   const signedAmount = isDebit ? -absAmount : absAmount;   // expense negative
   const type = isDebit ? 'expense' : 'income';
@@ -319,9 +329,11 @@ export function fingerprintFor(item) {
 //   • same bank id already imported            -> skip
 //   • booked row matches an imported pending    -> upgrade the pending in place
 //   • same fingerprint + same bank status       -> skip (re-seen pending / dup)
-export async function confirmImport(item, { name, categoryId, note }) {
+export async function confirmImport(item, { name, categoryId, note, type }) {
   const raw = Number(item.amount) || 0;
-  const isDebit = (item.bankType || '').toUpperCase() === 'DEBIT' || raw < 0;
+  // Honour an explicit cost/income override from the review card; otherwise
+  // classify from the bank's transaction type.
+  const isDebit = type ? (type === 'expense') : deriveIsDebit(item);
   const signedAmount = isDebit ? -Math.abs(raw) : Math.abs(raw);
   const bankStatus = item.bankStatus || 'booked';
   const bankId = item.bankTransactionId ? String(item.bankTransactionId) : null;
