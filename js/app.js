@@ -389,14 +389,16 @@ async function populateBalanceReviewStack() {
   host.querySelector('#bal-rev-confirm').onclick = async () => {
     if (dup && !confirm('This looks like a transaction you already logged manually. Add it anyway?')) return;
     await confirmImport(front, { name: p.name, categoryId: p.categoryId, note: p.name });
-    await upsertLearnedRule(p.token, { name: p.name, categoryId: p.categoryId });
-    populateBalanceReviewStack();
+    if (p.isDebit) await upsertLearnedRule(p.token, { name: p.name, categoryId: p.categoryId });
+    // Re-render the whole balance so the figure updates with the new transaction
+    // (this also repaints the review stack).
+    renderBalance();
   };
   host.querySelector('#bal-rev-ignore').onclick = async () => {
     await ignoreImport(front.id);
     populateBalanceReviewStack();
   };
-  host.querySelector('#bal-rev-edit').onclick = () => openBankReviewSheet(() => populateBalanceReviewStack());
+  host.querySelector('#bal-rev-edit').onclick = () => openBankReviewSheet(() => renderBalance());
 }
 
 async function openEntry(type, existingTxn = null, existingDist = null, forceDistribute = false, importItem = null) {
@@ -7408,7 +7410,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 23 Sep 2026 at 16:40 BST (v93)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 24 Sep 2026 at 15:26 BST (v94)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
