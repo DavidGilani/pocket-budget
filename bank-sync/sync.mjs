@@ -57,19 +57,36 @@ function fingerprint(t) {
   return `${pence}:${tok}`;
 }
 
+function dayDiff(a, b) {
+  if (!a || !b) return Infinity;
+  return Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
+}
+
 // 2. Cards on this consent.
 const cards = (await api('/data/v1/cards')).results || [];
 
 // 3. Transactions per card -> import queue (booked, then pending).
 const queue = ref.collection('importQueue');
 let seen = 0, queued = 0, skippedPreCutoff = 0, pendingQueued = 0;
-const bookedFingerprints = new Set();
+// Booked charges as {fingerprint, date}. A pending is only the same charge as a
+// booked one if they share a fingerprint AND are close in date — a genuine
+// settle happens within a few days. Matching on fingerprint alone wrongly
+// suppressed a new pending charge that coincidentally matched an OLD booked one
+// (same shop, same amount, different day).
+const bookedTwins = [];
+function bookedTwinNear(fp, date) {
+  return bookedTwins.some(b => b.fp === fp && dayDiff(b.date, date) <= 4);
+}
 
 async function queueOne(t, card, bankStatus) {
   const txDate = (t.timestamp || '').slice(0, 10);
   if (txDate && txDate <= cutoff) { skippedPreCutoff++; return; }
   const stableId = t.transaction_id || t.normalised_provider_transaction_id;
-  const docId = bankStatus === 'pending' ? `p_${stableId || fingerprint(t)}` : (stableId ? String(stableId) : '');
+  // Pending rows without a stable id are keyed by fingerprint + date, so two
+  // separate charges (same shop/amount, different days) don't collide on one id.
+  const docId = bankStatus === 'pending'
+    ? `p_${stableId || (fingerprint(t) + '_' + txDate)}`
+    : (stableId ? String(stableId) : '');
   if (!docId || docId === 'p_') return;
   seen++;
   try {
@@ -98,7 +115,7 @@ async function queueOne(t, card, bankStatus) {
 
 for (const card of cards) {
   const booked = (await api(`/data/v1/cards/${card.account_id}/transactions`)).results || [];
-  for (const t of booked) { bookedFingerprints.add(fingerprint(t)); }
+  for (const t of booked) { bookedTwins.push({ fp: fingerprint(t), date: (t.timestamp || '').slice(0, 10) }); }
   for (const t of booked) { await queueOne(t, card, 'booked'); }
 
   // Pending transactions give near-real-time visibility. Not every provider
@@ -111,19 +128,21 @@ for (const card of cards) {
     if (String(e.message).includes('Consent')) throw e;
   }
   for (const t of pending) {
-    if (bookedFingerprints.has(fingerprint(t))) continue;   // already settled
+    // Skip only if THIS pending charge has already settled into a nearby booked
+    // one (same fingerprint, within a few days) — not just any old match.
+    if (bookedTwinNear(fingerprint(t), (t.timestamp || '').slice(0, 10))) continue;
     await queueOne(t, card, 'pending');
   }
 }
 
 // Drop still-pending-review queue rows whose pending transaction has now
-// settled (a booked row with the same fingerprint exists), so it isn't offered
-// twice. Only touches rows the app hasn't actioned yet.
+// settled (a booked row with the same fingerprint AND a nearby date exists), so
+// it isn't offered twice. Only touches rows the app hasn't actioned yet.
 let supersededPending = 0;
 const pendingRows = await queue.where('status', '==', 'pending').get();
 for (const d of pendingRows.docs) {
   const data = d.data();
-  if (data.bankStatus === 'pending' && bookedFingerprints.has(data.fingerprint)) {
+  if (data.bankStatus === 'pending' && bookedTwinNear(data.fingerprint, data.date)) {
     await d.ref.delete(); supersededPending++;
   }
 }

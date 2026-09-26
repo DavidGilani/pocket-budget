@@ -194,13 +194,14 @@ function shiftDate(iso, days) {
 // transaction? Matches on fingerprint, or on amount + date within a few days
 // (covering merchant-text drift). Mirrors confirmImport's reconcile test.
 export async function hasPendingTwin(item) {
+  const absPence = Math.round(Math.abs(Number(item.amount) || 0) * 100);
+  if (!absPence || !item.date) return false;
+  const near4 = d => d && Math.abs((new Date(d + 'T12:00:00') - new Date(item.date + 'T12:00:00')) / 86400000) <= 4;
   const fp = fingerprintFor(item);
   if (fp) {
     const byFp = await db.transactions.where('bankFingerprint').equals(fp).toArray();
-    if (byFp.some(t => t.bankStatus === 'pending')) return true;
+    if (byFp.some(t => t.bankStatus === 'pending' && near4(t.date))) return true;
   }
-  const absPence = Math.round(Math.abs(Number(item.amount) || 0) * 100);
-  if (!absPence || !item.date) return false;
   const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
   return near.some(t => t.bankStatus === 'pending' && Math.round(Math.abs(Number(t.amount) || 0) * 100) === absPence);
 }
@@ -347,12 +348,18 @@ export async function confirmImport(item, { name, categoryId, note, type }) {
 
   let fpMatches = fp ? await db.transactions.where('bankFingerprint').equals(fp).toArray() : [];
 
+  // Same fingerprint (amount + merchant) is only the SAME charge if it's also
+  // close in date. A new charge that merely matches an old one (same shop, same
+  // amount, different day) must not be treated as a duplicate.
+  const near4 = d => d && item.date
+    && Math.abs((new Date(d + 'T12:00:00') - new Date(item.date + 'T12:00:00')) / 86400000) <= 4;
+
   // Fallback for a settling charge whose merchant text drifted between pending
   // and booked (so the fingerprints differ): a booked row will still adopt an
   // imported *pending* row of the same amount within a few days. Restricting to
   // pending rows keeps this safe — a pending charge is, by definition, awaiting
   // its booked twin.
-  if (bankStatus === 'booked' && !fpMatches.some(t => t.bankStatus === 'pending')) {
+  if (bankStatus === 'booked' && !fpMatches.some(t => t.bankStatus === 'pending' && near4(t.date))) {
     const absPence = Math.round(Math.abs(raw) * 100);
     const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
     const twin = near.find(t => t.bankStatus === 'pending'
@@ -361,7 +368,7 @@ export async function confirmImport(item, { name, categoryId, note, type }) {
   }
 
   if (fpMatches.length) {
-    const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending');
+    const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending' && near4(t.date));
     if (bankStatus === 'booked' && pendingMatch) {
       // The pending charge has settled — update the existing transaction with the
       // final amount/id rather than creating a second one. Keep the user's
@@ -377,7 +384,9 @@ export async function confirmImport(item, { name, categoryId, note, type }) {
       await markImport(item.id, 'imported', { importedTxId: pendingMatch.id, reconciled: true });
       return pendingMatch.id;
     }
-    if (fpMatches.some(t => (t.bankStatus || 'booked') === bankStatus)) {
+    // Re-seen the same charge in the same state (e.g. a pending re-fetched with a
+    // fresh synthetic id) — skip. Date-bounded so a distinct new charge isn't.
+    if (fpMatches.some(t => (t.bankStatus || 'booked') === bankStatus && near4(t.date))) {
       await markImport(item.id, 'imported', { note: 'duplicate fingerprint' });
       return null;
     }
