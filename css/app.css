@@ -22,6 +22,7 @@
   --shadow:      0 2px 8px rgba(0,0,0,.12);
   --nav-height:  64px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top:    env(safe-area-inset-top, 0px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -93,6 +94,9 @@ html, body {
   display: flex;
   flex-direction: column;
   padding: 0;
+  /* Clear the status bar / notch here (once), so any banner shown above the
+     header sits below it rather than under the clock & battery. */
+  padding-top: var(--safe-top);
   position: relative;
   color: white;
 }
@@ -102,7 +106,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 52px 20px 0;
+  padding: 12px 20px 0;
 }
 
 .balance-menu-btn {
