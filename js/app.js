@@ -2992,9 +2992,6 @@ async function renderNetWealth() {
     return baseNetWealth * Math.pow(1 + rate / 100, years);
   }
 
-  const lastOctDate = sortedDatesAsc.filter(d => d.slice(5, 7) === '10').pop();
-  const lastOctNet = lastOctDate ? netByDate[lastOctDate] : null;
-
   // Full amounts (not compact)
   const fmt2 = v => {
     const abs = Math.abs(v);
@@ -3057,10 +3054,14 @@ async function renderNetWealth() {
             ${dates.map(d => `<td style="${wealthCellStyle}">${fmt2(netByDate[d])}</td>`).join('')}
           </tr>
           <tr>
-            <td style="${labelStyle}">Change (vs last Oct)</td>
-            ${dates.map(d => {
-              if (!lastOctNet || d === lastOctDate) return `<td style="${colStyle}">–</td>`;
-              const chg = netByDate[d] - lastOctNet;
+            <td style="${labelStyle}">Change</td>
+            ${dates.map((d, i) => {
+              // Each entry's change vs the previous (older) snapshot. `dates` is
+              // newest-first, so the older entry is the next column; the oldest
+              // snapshot has nothing to compare against.
+              const prev = dates[i + 1];
+              if (!prev) return `<td style="${colStyle}">–</td>`;
+              const chg = netByDate[d] - netByDate[prev];
               return `<td style="${colStyle};color:${chg >= 0 ? '#43a047' : '#e53935'}">${chg >= 0 ? '+' : ''}${fmt2(chg)}</td>`;
             }).join('')}
           </tr>
@@ -7410,7 +7411,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 2 Oct 2026 at 15:20 BST (v97)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 2 Oct 2026 at 15:25 BST (v98)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
