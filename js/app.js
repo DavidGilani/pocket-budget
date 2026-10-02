@@ -7410,7 +7410,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 1 Oct 2026 at 08:15 BST (v96)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 2 Oct 2026 at 15:20 BST (v97)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7691,7 +7691,7 @@ function bankReviewCardHTML({ item, p, i, dup }, catMap) {
     <div class="settings-card" style="margin:8px 12px;padding:12px${dup ? ';border:1.5px solid #e65100' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:baseline">
         <div style="font-weight:700;font-size:16px">${fmt(Math.abs(p.signedAmount))}${p.isDebit ? '' : ' (refund)'}${item.bankStatus === 'pending' ? ' <span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:#1a73e8;background:#e8f0fe;border-radius:8px;padding:2px 6px;vertical-align:middle">PENDING</span>' : ''}</div>
-        <div style="font-size:12px;color:var(--text-2)">${fmtDate(item.date)}</div>
+        <button class="bi-date" data-idx="${i}" style="font-size:12px;color:#1a73e8;font-weight:600;background:none;border:none;cursor:pointer;padding:0"><span class="bi-date-label">${fmtDate(item.date)}</span> ✎</button>
       </div>
       ${item.bankStatus === 'pending' ? `<div style="font-size:12px;color:var(--text-2);margin-top:4px">Still settling at the bank — the amount may change slightly; it's updated automatically once it posts.</div>` : ''}
       ${dup ? `<div style="font-size:12px;color:#e65100;margin-top:4px">⚠️ Looks like a transaction you already logged — check before confirming.</div>` : ''}
@@ -7723,10 +7723,19 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
   const incomeCats = all.filter(c => c.isIncome && !c.isArchived).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
   const incomeDefault = (incomeCats.find(c => c.id === 13) || incomeCats[0])?.id ?? null;
 
-  const chosenCat = {}, chosenType = {};
-  rows.forEach(({ p, i }) => {
+  const chosenCat = {}, chosenType = {}, chosenDate = {};
+  rows.forEach(({ item, p, i }) => {
     chosenType[i] = p.isDebit ? 'expense' : 'income';
     chosenCat[i] = p.isDebit ? p.categoryId : incomeDefault;
+    chosenDate[i] = item.date;
+  });
+
+  root.querySelectorAll('.bi-date').forEach(btn => btn.onclick = () => {
+    const i = Number(btn.dataset.idx);
+    openDatePicker(chosenDate[i] || today(), today(), d => {
+      chosenDate[i] = d;
+      btn.querySelector('.bi-date-label').textContent = fmtDate(d);
+    });
   });
 
   root.querySelectorAll('.bi-type').forEach(btn => btn.onclick = () => {
@@ -7763,7 +7772,7 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
     const desc = (root.querySelector(`.bi-desc[data-idx="${i}"]`).value || '').trim();
     const categoryId = chosenCat[i] ?? p.categoryId;
     const type = chosenType[i];
-    await confirmImport(item, { name: p.name, categoryId, note: desc, type });
+    await confirmImport(item, { name: p.name, categoryId, note: desc, type, date: chosenDate[i] });
     // Teach the rules engine for costs only — learning a category from an
     // occasional refund would wrongly file the merchant's future purchases.
     if (type === 'expense') {
@@ -7790,7 +7799,7 @@ function wireBankReviewCards(root, rows, cats, catMap, afterAction) {
     // Close the review sheet (if this card is in one) so the entry editor is
     // unobstructed, then open it in distribute mode linked to this import.
     root.closest('.sheet-overlay')?.remove();
-    openEntry(type, { amount: signed, categoryId, note: desc, date: item.date }, null, true, item);
+    openEntry(type, { amount: signed, categoryId, note: desc, date: chosenDate[i] || item.date }, null, true, item);
   });
 
   root.querySelectorAll('.bi-always-ignore').forEach(btn => btn.onclick = async () => {

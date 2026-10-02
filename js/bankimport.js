@@ -330,7 +330,7 @@ export function fingerprintFor(item) {
 //   • same bank id already imported            -> skip
 //   • booked row matches an imported pending    -> upgrade the pending in place
 //   • same fingerprint + same bank status       -> skip (re-seen pending / dup)
-export async function confirmImport(item, { name, categoryId, note, type }) {
+export async function confirmImport(item, { name, categoryId, note, type, date }) {
   const raw = Number(item.amount) || 0;
   // Honour an explicit cost/income override from the review card; otherwise
   // classify from the bank's transaction type.
@@ -393,7 +393,7 @@ export async function confirmImport(item, { name, categoryId, note, type }) {
   }
 
   const txn = {
-    date: item.date, amount: signedAmount, categoryId,
+    date: date || item.date, amount: signedAmount, categoryId,
     note: (note != null ? note : name || '').trim(),
     type: isDebit ? 'expense' : 'income', distributionId: null,
     bankTransactionId: bankId, bankFingerprint: fp, bankStatus, source: 'truelayer',
