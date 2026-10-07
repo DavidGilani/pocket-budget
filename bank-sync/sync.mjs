@@ -57,10 +57,6 @@ function fingerprint(t) {
   return `${pence}:${tok}`;
 }
 
-function dayDiff(a, b) {
-  if (!a || !b) return Infinity;
-  return Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
-}
 
 // 2. Cards on this consent.
 const cards = (await api('/data/v1/cards')).results || [];
@@ -69,13 +65,20 @@ const cards = (await api('/data/v1/cards')).results || [];
 const queue = ref.collection('importQueue');
 let seen = 0, queued = 0, skippedPreCutoff = 0, pendingQueued = 0;
 // Booked charges as {fingerprint, date}. A pending is only the same charge as a
-// booked one if they share a fingerprint AND are close in date — a genuine
-// settle happens within a few days. Matching on fingerprint alone wrongly
-// suppressed a new pending charge that coincidentally matched an OLD booked one
-// (same shop, same amount, different day).
+// booked one if they share a fingerprint AND the booked one is dated on/after
+// the pending (a charge is authorised, then settles) within a week. An older
+// booked charge never swallows a newer pending one — that's a genuine second
+// spend that happens to be the same amount.
 const bookedTwins = [];
 function bookedTwinNear(fp, date) {
-  return bookedTwins.some(b => b.fp === fp && dayDiff(b.date, date) <= 4);
+  if (!date) return false;
+  return bookedTwins.some(b => {
+    if (b.fp !== fp || !b.date) return false;
+    // Days from the pending to the booked one (+ve = booked is later). One day
+    // of slack either side of "same day" allows for timestamp quirks.
+    const diff = (new Date(b.date + 'T12:00:00') - new Date(date + 'T12:00:00')) / 86400000;
+    return diff >= -1 && diff <= 7;
+  });
 }
 
 async function queueOne(t, card, bankStatus) {

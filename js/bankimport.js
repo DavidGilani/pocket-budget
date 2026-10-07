@@ -190,20 +190,45 @@ function shiftDate(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
-// Is this booked row the settled version of an already-imported PENDING
-// transaction? Matches on fingerprint, or on amount + date within a few days
-// (covering merchant-text drift). Mirrors confirmImport's reconcile test.
-export async function hasPendingTwin(item) {
-  const absPence = Math.round(Math.abs(Number(item.amount) || 0) * 100);
-  if (!absPence || !item.date) return false;
-  const near4 = d => d && Math.abs((new Date(d + 'T12:00:00') - new Date(item.date + 'T12:00:00')) / 86400000) <= 4;
+// How long a pending card charge can take to settle into its booked version.
+const SETTLE_WINDOW_DAYS = 7;
+
+function daysApart(a, b) {
+  if (!a || !b) return Infinity;
+  return Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
+}
+
+const pence = v => Math.round(Math.abs(Number(v) || 0) * 100);
+
+// Find the imported PENDING record this booked row is the settlement of: same
+// amount, still marked pending, and dated up to a week BEFORE the booked row (a
+// charge is authorised first, then settles — never the other way round; one day
+// of slack allows for timestamp quirks). A fingerprint (amount + merchant) match
+// is preferred, else amount alone, covering merchant text that drifts between
+// pending and booked. Closest date wins. Looks at single transactions and at
+// distributions created from a pending import.
+async function findPendingTwin(item) {
+  const amt = pence(item.amount);
+  if (!amt || !item.date) return null;
+  const from = shiftDate(item.date, -SETTLE_WINDOW_DAYS), to = shiftDate(item.date, 1);
   const fp = fingerprintFor(item);
-  if (fp) {
-    const byFp = await db.transactions.where('bankFingerprint').equals(fp).toArray();
-    if (byFp.some(t => t.bankStatus === 'pending' && near4(t.date))) return true;
-  }
-  const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
-  return near.some(t => t.bankStatus === 'pending' && Math.round(Math.abs(Number(t.amount) || 0) * 100) === absPence);
+  const byClosest = (a, b) => daysApart(a.date, item.date) - daysApart(b.date, item.date);
+  const pick = list => list.filter(r => r.bankFingerprint === fp).sort(byClosest)[0] || list.sort(byClosest)[0];
+
+  const txns = (await db.transactions.where('date').between(from, to, true, true).toArray())
+    .filter(t => t.bankStatus === 'pending' && pence(t.amount) === amt);
+  if (txns.length) return { table: 'transactions', row: pick(txns) };
+
+  const dists = (await db.distributions.where('startDate').between(from, to, true, true).toArray())
+    .filter(d => d.bankStatus === 'pending' && pence(d.totalAmount) === amt)
+    .map(d => ({ ...d, date: d.startDate }));
+  if (dists.length) return { table: 'distributions', row: pick(dists) };
+  return null;
+}
+
+// Is this booked row the settled version of an already-imported pending one?
+export async function hasPendingTwin(item) {
+  return !!(await findPendingTwin(item));
 }
 
 export async function fetchPending() {
@@ -327,9 +352,10 @@ export function fingerprintFor(item) {
 
 // ── Creating the transaction ──────────────────────────────────────────────────
 // Idempotent and pending-aware:
-//   • same bank id already imported            -> skip
-//   • booked row matches an imported pending    -> upgrade the pending in place
-//   • same fingerprint + same bank status       -> skip (re-seen pending / dup)
+//   • same bank id already imported                          -> skip
+//   • booked row settles an imported pending (≤ 7 days)      -> upgrade in place
+//   • pending row = same merchant/amount/day already logged  -> skip (re-seen)
+//   • anything else (incl. a 2nd same-amount pending)        -> new transaction
 export async function confirmImport(item, { name, categoryId, note, type, date }) {
   const raw = Number(item.amount) || 0;
   // Honour an explicit cost/income override from the review card; otherwise
@@ -346,35 +372,16 @@ export async function confirmImport(item, { name, categoryId, note, type, date }
     if (byId > 0) { await markImport(item.id, 'imported', { note: 'already existed' }); return null; }
   }
 
-  let fpMatches = fp ? await db.transactions.where('bankFingerprint').equals(fp).toArray() : [];
-
-  // Same fingerprint (amount + merchant) is only the SAME charge if it's also
-  // close in date. A new charge that merely matches an old one (same shop, same
-  // amount, different day) must not be treated as a duplicate.
-  const near4 = d => d && item.date
-    && Math.abs((new Date(d + 'T12:00:00') - new Date(item.date + 'T12:00:00')) / 86400000) <= 4;
-
-  // Fallback for a settling charge whose merchant text drifted between pending
-  // and booked (so the fingerprints differ): a booked row will still adopt an
-  // imported *pending* row of the same amount within a few days. Restricting to
-  // pending rows keeps this safe — a pending charge is, by definition, awaiting
-  // its booked twin.
-  if (bankStatus === 'booked' && !fpMatches.some(t => t.bankStatus === 'pending' && near4(t.date))) {
-    const absPence = Math.round(Math.abs(raw) * 100);
-    const near = await db.transactions.where('date').between(shiftDate(item.date, -4), shiftDate(item.date, 4), true, true).toArray();
-    const twin = near.find(t => t.bankStatus === 'pending'
-      && Math.round(Math.abs(Number(t.amount) || 0) * 100) === absPence);
-    if (twin) fpMatches = [twin, ...fpMatches];
-  }
-
-  if (fpMatches.length) {
-    const pendingMatch = fpMatches.find(t => t.bankStatus === 'pending' && near4(t.date));
-    if (bankStatus === 'booked' && pendingMatch) {
-      // The pending charge has settled — update the existing transaction with the
-      // final amount/id rather than creating a second one. Keep the user's
-      // category and note, and keep the EARLIER date: the pending row carries the
-      // day the spend was actually made, while the booked row's date is often the
-      // later day it settled/processed. We want the spend date.
+  if (bankStatus === 'booked') {
+    // A booked charge that settles a pending one we already imported (same
+    // amount, pending dated up to a week earlier) is the SAME spend: upgrade
+    // that record in place rather than creating a second one.
+    const twin = await findPendingTwin(item);
+    if (twin?.table === 'transactions') {
+      const pendingMatch = twin.row;
+      // Keep the user's category and note, and the EARLIER date — the pending
+      // row carries the day the spend was made; the booked date is often the
+      // later day it settled.
       const spendDate = [pendingMatch.date, item.date].filter(Boolean).sort()[0] || item.date;
       await db.transactions.update(pendingMatch.id, {
         amount: signedAmount, date: spendDate, bankTransactionId: bankId,
@@ -384,10 +391,24 @@ export async function confirmImport(item, { name, categoryId, note, type, date }
       await markImport(item.id, 'imported', { importedTxId: pendingMatch.id, reconciled: true });
       return pendingMatch.id;
     }
-    // Re-seen the same charge in the same state (e.g. a pending re-fetched with a
-    // fresh synthetic id) — skip. Date-bounded so a distinct new charge isn't.
-    if (fpMatches.some(t => (t.bankStatus || 'booked') === bankStatus && near4(t.date))) {
-      await markImport(item.id, 'imported', { note: 'duplicate fingerprint' });
+    if (twin?.table === 'distributions') {
+      // The pending charge was spread as a big expense — just mark it settled.
+      await db.distributions.update(twin.row.id, { bankTransactionId: bankId, bankStatus: 'booked' });
+      queueWrite('distributions', twin.row.id).catch(() => {});
+      await markImport(item.id, 'imported', { reconciled: true, distributionId: twin.row.id });
+      return null;
+    }
+    // No pending twin: a distinct booked charge (re-seen booked rows are already
+    // caught by the bank-id check above), so fall through and create it.
+  } else {
+    // A PENDING charge is a new spend unless it's literally the same charge seen
+    // again (same merchant, same amount, same day — e.g. re-fetched under a new
+    // id). A second pending charge on another day, even for an identical amount,
+    // is a genuine second spend and must come through.
+    const sameCharge = fp ? (await db.transactions.where('bankFingerprint').equals(fp).toArray())
+      .some(t => t.date === item.date) : false;
+    if (sameCharge) {
+      await markImport(item.id, 'imported', { note: 'same pending charge re-seen' });
       return null;
     }
   }
