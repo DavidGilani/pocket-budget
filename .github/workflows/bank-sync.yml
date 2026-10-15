@@ -1,15 +1,16 @@
-name: Bank sync (nightly)
+name: Bank sync
 
 # Pulls new Lloyds credit-card transactions into Firestore's importQueue for
-# review in the app. Runs nightly, and can also be run on demand from the
-# Actions tab (Run workflow). Requires "Bank connect" to have run first.
+# review in the app. Requires "Bank connect" to have run first.
+#
+# No GitHub schedule here: GitHub delays scheduled runs by hours. Instead the
+# Cloudflare Worker (bank-sync/worker/worker.js) triggers this workflow on time
+# at 7am, 1pm and 6pm UK time (DST-aware), and also on each in-app
+# "Pull from bank now" tap. Open Banking allows ~4 unattended pulls a day, so
+# three scheduled slots leave roughly one on-demand tap. It can also be run
+# manually from the Actions tab (Run workflow).
 
 on:
-  schedule:
-    # Nightly. Open Banking allows ~4 unattended pulls a day; keeping the
-    # schedule to one leaves the rest for on-demand "Pull from bank now" taps
-    # (which also arrive here via workflow_dispatch). Timing is best-effort.
-    - cron: "0 3 * * *"
   workflow_dispatch:
 
 jobs:

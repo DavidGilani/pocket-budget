@@ -12,6 +12,13 @@
 //   FIREBASE_PROJECT_ID  (var)     e.g. pocket-budget-d42a7
 //   GITHUB_REPO          (var)     e.g. DavidGilani/pocket-budget
 //   ALLOWED_ORIGIN       (var)     e.g. https://davidgilani.github.io
+//   SYNC_HOURS_UK        (var, optional) UK hours for scheduled syncs, default "7,13,18"
+//
+// Scheduled syncs: add a Cron Trigger (Settings > Triggers) of
+//   0 6,7,12,13,17,18 * * *
+// i.e. both the BST and GMT UTC-equivalents of each UK slot; the scheduled()
+// handler keeps only the firing that is actually 7am / 1pm / 6pm UK time.
+// If you change SYNC_HOURS_UK, list each hour's two UTC equivalents in the cron.
 
 const JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
 
@@ -71,20 +78,43 @@ export default {
       return json({ error: 'not allowed' }, 403, env);
     }
 
-    const url = `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/bank-sync.yml/dispatches`;
-    const gh = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'pocket-ledger-bank-pull',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ ref: 'main' }),
-    });
-    if (gh.status === 204) return json({ ok: true }, 200, env);
-    const detail = (await gh.text()).slice(0, 200);
-    return json({ error: `github ${gh.status}`, detail }, 502, env);
+    const gh = await triggerBankSync(env);
+    if (gh.ok) return json({ ok: true }, 200, env);
+    return json({ error: `github ${gh.status}`, detail: gh.detail }, 502, env);
+  },
+
+  // Scheduled syncs (Cloudflare Cron Trigger). Cloudflare cron runs in UTC, so
+  // the trigger is set to fire at BOTH possible UTC hours for each UK slot —
+  // "0 6,7,12,13,17,18 * * *" — and this handler only pulls when the current
+  // UK (Europe/London) hour is one of the slots. That way exactly one firing per
+  // slot matches, whether the UK is on GMT or BST, with no change needed when
+  // the clocks go forward or back.
+  async scheduled(event, env, ctx) {
+    const slots = String(env.SYNC_HOURS_UK || '7,13,18').split(',').map(s => Number(s.trim()));
+    const ukHour = Number(new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London', hour: 'numeric', hourCycle: 'h23',
+    }).format(new Date(event.scheduledTime)));
+    if (!slots.includes(ukHour)) return; // the other-season twin of a slot — skip
+    ctx.waitUntil(triggerBankSync(env).then(r => {
+      if (!r.ok) console.log(`scheduled bank sync failed: github ${r.status} ${r.detail}`);
+    }));
   },
 };
+
+// Ask GitHub to run the "Bank sync" workflow (workflow_dispatch).
+async function triggerBankSync(env) {
+  const url = `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/bank-sync.yml/dispatches`;
+  const gh = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'pocket-ledger-bank-pull',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ref: 'main' }),
+  });
+  if (gh.status === 204) return { ok: true, status: 204 };
+  return { ok: false, status: gh.status, detail: (await gh.text()).slice(0, 200) };
+}
