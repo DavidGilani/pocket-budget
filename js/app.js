@@ -7411,7 +7411,7 @@ async function renderSettings() {
         </div>
       </div>
       ${syncSection}
-      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 15 Oct 2026 at 16:07 BST (v100)</div>
+      <div style="text-align:center;padding:20px;color:var(--text-2);font-size:12px">App updated: 16 Oct 2026 at 17:43 BST (v101)</div>
     </div>
   `;
   viewContainer.querySelector('#savings-target-row').onclick = () => openSavingsSheet();
@@ -7611,7 +7611,7 @@ async function renderBankImport() {
       ${header}
       ${meta?.needsReconsent ? `<div style="margin:8px 12px;padding:12px;border-radius:10px;background:#fff3e0;color:#e65100;font-size:13px">⚠️ Bank connection expired. Re-run the “Bank connect” step in GitHub Actions to resume automatic imports.</div>` : ''}
       <div style="display:flex;align-items:center;gap:8px;padding:10px 16px 2px">
-        <div style="color:var(--text-2);font-size:12px;flex:1">${meta?.lastSyncAt ? `Last checked ${fmtDate(String(meta.lastSyncAt).slice(0, 10))}` : 'Not synced yet'}</div>
+        <div style="color:var(--text-2);font-size:12px;flex:1">${meta?.lastSyncAt ? `Last checked ${new Date(meta.lastSyncAt).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : 'Not synced yet'}</div>
         <button id="bi-refresh" style="font-size:12px;padding:5px 12px;border-radius:16px;border:1.5px solid var(--border);background:transparent;color:var(--text);cursor:pointer">↻ Refresh</button>
         ${pullUrl ? `<button id="bi-pull" style="font-size:12px;padding:5px 12px;border-radius:16px;border:none;background:var(--primary,#1a73e8);color:#fff;cursor:pointer;font-weight:600">⚡ Pull from bank now</button>` : ''}
       </div>
